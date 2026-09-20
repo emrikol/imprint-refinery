@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Imprint Refinery</title>
+  <desc id="desc">An infrared waveform becoming a clean digital pulse inside a rounded signal die.</desc>
+  <defs>
+    <linearGradient id="background" x1="48" y1="32" x2="464" y2="480" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#102434"/>
+      <stop offset="1" stop-color="#07111c"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="64" y1="180" x2="448" y2="332" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#24c8f2"/>
+      <stop offset="1" stop-color="#00a4d4"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#background)"/>
+  <path d="M256 70 409 158v176L256 442 103 354V158Z" fill="#0b1a27" stroke="#24c8f2" stroke-width="20" stroke-linejoin="round"/>
+  <path d="M54 270h48v-54h48v118h48v-82h48v72h54v-96h54v96h54v-54h50" fill="none" stroke="url(#signal)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="256" cy="138" r="13" fill="#fff"/>
+  <circle cx="256" cy="374" r="13" fill="#fff"/>
+</svg>

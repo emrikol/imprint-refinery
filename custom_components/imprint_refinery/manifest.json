@@ -1,0 +1,19 @@
+{
+  "domain": "imprint_refinery",
+  "name": "Imprint Refinery",
+  "after_dependencies": ["zha"],
+  "codeowners": ["@emrikol"],
+  "config_flow": true,
+  "dependencies": ["http", "infrared", "lovelace"],
+  "documentation": "https://github.com/emrikol/imprint-refinery",
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/emrikol/imprint-refinery/issues",
+  "loggers": [
+    "custom_components.imprint_refinery",
+    "zhaquirks.tuya.ts1201",
+    "zigpy"
+  ],
+  "requirements": ["defusedxml==0.7.1"],
+  "version": "0.1.0"
+}

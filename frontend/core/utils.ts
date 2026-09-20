@@ -1,0 +1,428 @@
+import type { AnalysisData, CommandEntry, RegistryData } from "../types";
+
+export interface BinaryPayload {
+  value: string;
+  bit_count?: number;
+  display_order?: string;
+  bit_order?: string;
+  encoding?: string;
+  symbol?: string;
+  zero_us?: number;
+  one_us?: number;
+  evidence?: string;
+  confidence_score?: number;
+  agreement_count?: number;
+  method_count?: number;
+  fit_score?: number;
+}
+
+export type BinaryDecoderMode =
+  | "auto"
+  | "pulse_distance"
+  | "pulse_width"
+  | "protocol";
+
+export const binaryDecoderChoices: Array<{
+  value: BinaryDecoderMode;
+  label: string;
+}> = [
+  { value: "auto", label: "Auto · require agreement" },
+  { value: "pulse_distance", label: "Pulse-distance model" },
+  { value: "pulse_width", label: "Pulse-width model" },
+  { value: "protocol", label: "Named protocol decoder" },
+];
+
+export const evidenceLabel = (analysis?: AnalysisData): string => {
+  const value = analysis?.evidence_class || analysis?.confidence || "unknown";
+  return (
+    (
+      {
+        verified: "Verified",
+        high: "Verified",
+        likely: "Likely",
+        medium: "Likely",
+        ambiguous: "Ambiguous",
+        pattern_only: "Pattern only",
+        unknown: "Unknown",
+      } as Record<string, string>
+    )[value] || "Unknown"
+  );
+};
+
+export const formatDuration = (microseconds = 0): string => {
+  if (microseconds >= 1_000_000)
+    return `${(microseconds / 1_000_000).toFixed(2)} s`;
+  if (microseconds >= 1_000) return `${(microseconds / 1_000).toFixed(2)} ms`;
+  return `${Math.round(microseconds)} µs`;
+};
+
+export interface RepeatSummary {
+  captured: string;
+  capturedDetail: string;
+  required: string;
+  requiredDetail: string;
+}
+
+export const repeatSummary = (analysis?: AnalysisData): RepeatSummary => {
+  const captured = Number.isInteger(analysis?.repeat_count)
+    ? Number(analysis?.repeat_count)
+    : Number.isInteger(analysis?.repeated_frame_count)
+      ? Number(analysis?.repeated_frame_count)
+      : analysis?.frame_count === 1
+        ? 0
+        : null;
+  const required = Number.isInteger(analysis?.required_repeats)
+    ? Number(analysis?.required_repeats)
+    : null;
+  return {
+    captured: captured == null ? "Unclear" : String(captured),
+    capturedDetail:
+      captured == null
+        ? "The capture has multiple possible frame interpretations."
+        : "Repeat frames found in this saved capture.",
+    required:
+      required == null
+        ? "Not determined"
+        : required
+          ? String(required)
+          : "None",
+    requiredDetail:
+      required == null
+        ? "The protocol candidates do not agree."
+        : required
+          ? `A valid press needs ${required + 1} frames total.`
+          : "No repeats are required for one press.",
+  };
+};
+
+export const binaryPayloadFor = (
+  analysis?: AnalysisData,
+  mode: BinaryDecoderMode = "auto",
+): BinaryPayload | null => {
+  const decoders = analysis?.binary_decoders as any;
+  if (mode === "pulse_distance" || mode === "pulse_width") {
+    const result = decoders?.results?.find(
+      (item: any) => item?.mode === mode && item?.status === "matched",
+    );
+    return result?.payload?.value
+      ? {
+          ...result.payload,
+          fit_score: Math.round(Number(result.fit || 0) * 100),
+        }
+      : null;
+  }
+  if (mode === "protocol") {
+    const results = Array.isArray(decoders?.protocol_results)
+      ? decoders.protocol_results
+      : [];
+    const values = new Set(
+      results.map((item: any) => item?.payload?.value).filter(Boolean),
+    );
+    return values.size === 1 && results[0]?.payload?.value
+      ? (results[0].payload as BinaryPayload)
+      : null;
+  }
+  if (decoders?.auto && decoders.auto.status !== "matched") return null;
+  const direct = analysis?.binary_payload as
+    | Record<string, unknown>
+    | undefined;
+  if (direct && typeof direct === "object" && typeof direct.value === "string")
+    return direct as unknown as BinaryPayload;
+  const candidate = (analysis?.protocol_candidates || []).find(
+    (item: any) => item?.binary_payload?.value,
+  );
+  return (candidate?.binary_payload as BinaryPayload | undefined) || null;
+};
+
+export const binaryDecoderMessage = (
+  analysis: AnalysisData | undefined,
+  mode: BinaryDecoderMode,
+): string => {
+  const decoders = analysis?.binary_decoders as any;
+  if (mode === "auto") {
+    if (decoders?.auto?.status === "ambiguous")
+      return "The applicable decoders produced different bitstreams. Choose a decoder to inspect each interpretation.";
+    return "No supported binary timing model fits this waveform cleanly.";
+  }
+  if (mode === "protocol")
+    return "The named protocol decoders do not agree on one raw bitstream.";
+  const reason = decoders?.results?.find(
+    (item: any) => item?.mode === mode,
+  )?.reason;
+  return (
+    (
+      {
+        not_enough_symbols: "There are not enough symbols to apply this model.",
+        mark_axis_has_too_many_classes:
+          "The mark timings contain more than two duration classes.",
+        mark_axis_is_not_binary:
+          "The mark timings do not form two clean duration classes.",
+        space_axis_is_not_binary:
+          "The space timings do not form two clean duration classes.",
+        space_axis_has_too_many_classes:
+          "The space timings contain more than two duration classes.",
+        space_axis_does_not_have_two_classes:
+          "Pulse-distance decoding requires two clean space-duration classes.",
+        requires_two_mark_classes_and_one_space_class:
+          "Pulse-width decoding requires two mark-duration classes and one space-duration class.",
+        leading_pair_matches_data:
+          "The leading pair looks like data rather than a separate header.",
+      } as Record<string, string>
+    )[String(reason || "")] ||
+    "This decoder does not fit the captured timing pattern."
+  );
+};
+
+export const binaryScoreLabel = (
+  payload: BinaryPayload,
+  mode: BinaryDecoderMode,
+): string => {
+  if (mode === "auto" && payload.confidence_score != null) {
+    const agreement =
+      payload.method_count && payload.method_count > 1
+        ? ` · ${payload.agreement_count}/${payload.method_count} decoders agree`
+        : " · one applicable decoder";
+    return `${payload.confidence_score}% support${agreement}`;
+  }
+  if (payload.fit_score != null) return `${payload.fit_score}% timing fit`;
+  return "Protocol interpretation";
+};
+
+export const groupedBinary = (value = ""): string =>
+  value.match(/.{1,8}/g)?.join(" ") || value;
+
+export const binaryEncodingLabel = (encoding?: string): string =>
+  (
+    ({
+      pulse_distance: "Pulse-distance",
+      pulse_distance_width: "Pulse distance/width",
+      pulse_width: "Pulse-width",
+      biphase: "Biphase",
+    }) as Record<string, string>
+  )[String(encoding || "")] || "Binary timing";
+
+export const decodedInteger = (value: number): string => {
+  const byteWidth = Math.max(
+    1,
+    Math.ceil(Math.max(1, value.toString(2).length) / 8),
+  );
+  const hex = value
+    .toString(16)
+    .toUpperCase()
+    .padStart(byteWidth * 2, "0");
+  const binary = value.toString(2).padStart(byteWidth * 8, "0");
+  return `${value} · 0x${hex} · 0b${binary}`;
+};
+
+export const binaryPayloadExplanation = (
+  payload: BinaryPayload,
+  protocol?: string,
+): string => {
+  if (payload.evidence?.includes("recognized_protocol")) {
+    const order =
+      payload.bit_order === "lsb_first"
+        ? "Each decoded field is sent least-significant bit first."
+        : "The protocol decoder determines the field order.";
+    return `Derived from the waveform's timing clusters and confirmed by ${protocol || "the protocol decoder"}. Bits are shown in transmission order. ${order}`;
+  }
+  const changingPart = payload.symbol === "mark_length" ? "mark" : "space";
+  return `Short ${changingPart} ≈ ${payload.zero_us || "?"} µs maps to 0; long ${changingPart} ≈ ${payload.one_us || "?"} µs maps to 1. The timing clusters support this stream, but the protocol, bit order, and field meanings are unknown.`;
+};
+
+export const slugify = (value: string): string =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/\+/g, " plus ")
+    .replace(/&/g, " and ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+export const validId = (value: string): boolean => /^[a-z0-9_]+$/.test(value);
+
+export const uniqueKey = (
+  base: string,
+  existing: ReadonlySet<string> | Record<string, unknown>,
+): string => {
+  const occupied = (candidate: string) =>
+    existing instanceof Set
+      ? existing.has(candidate)
+      : Object.hasOwn(existing, candidate);
+  let candidate = base;
+  let suffix = 2;
+  while (occupied(candidate)) candidate = `${base}_${suffix++}`;
+  return candidate;
+};
+
+export const deepActiveElement = (
+  root: Document | ShadowRoot = document,
+): HTMLElement | null => {
+  let active = root.activeElement as HTMLElement | null;
+  while (active?.shadowRoot?.activeElement) {
+    active = active.shadowRoot.activeElement as HTMLElement;
+  }
+  return active;
+};
+
+export const trapTabKey = (
+  event: KeyboardEvent,
+  focusable: HTMLElement[],
+  active: Element | null,
+): void => {
+  if (event.key !== "Tab" || !focusable.length) return;
+  const index = focusable.indexOf(active as HTMLElement);
+  if (event.shiftKey && index <= 0) {
+    event.preventDefault();
+    focusable.at(-1)?.focus();
+  } else if (!event.shiftKey && index === focusable.length - 1) {
+    event.preventDefault();
+    focusable[0].focus();
+  }
+};
+
+const SYSTEM_UNASSIGNED_NAMES = new Set([
+  "",
+  "remote",
+  "unsorted",
+  "unsorted remote",
+]);
+
+export const isSystemUnassigned = (
+  locId: string,
+  applianceId: string,
+  name?: string,
+): boolean =>
+  locId === "unsorted" &&
+  applianceId === "remote" &&
+  SYSTEM_UNASSIGNED_NAMES.has(
+    String(name || "")
+      .trim()
+      .toLocaleLowerCase(),
+  );
+
+export const applianceDisplayName = (
+  locId: string,
+  applianceId: string,
+  name?: string,
+  unassignedLabel = "Unassigned commands",
+): string =>
+  isSystemUnassigned(locId, applianceId, name)
+    ? unassignedLabel
+    : String(name || applianceId);
+
+export const locationDisplayName = (locId: string, name?: string): string =>
+  locId === "unsorted" &&
+  ["", "unsorted"].includes(
+    String(name || "")
+      .trim()
+      .toLocaleLowerCase(),
+  )
+    ? ""
+    : String(name || locId);
+
+export const humanizeToken = (value: unknown): string =>
+  String(value || "")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+
+export const allCommands = (registry: RegistryData): CommandEntry[] => {
+  const entries: CommandEntry[] = [];
+  for (const [locId, location] of Object.entries(registry.locations || {})) {
+    for (const [applianceId, appliance] of Object.entries(
+      location.appliances || {},
+    )) {
+      for (const [cmdId, command] of Object.entries(appliance.commands || {})) {
+        entries.push({
+          locId,
+          applianceId,
+          cmdId,
+          location,
+          appliance,
+          command,
+        });
+      }
+    }
+  }
+  return entries;
+};
+
+export const copyText = async (value: string): Promise<void> => {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const area = document.createElement("textarea");
+  area.value = value;
+  area.readOnly = true;
+  area.style.cssText = "position:fixed;opacity:0";
+  document.body.append(area);
+  area.select();
+  const copied = document.execCommand("copy");
+  area.remove();
+  if (!copied) throw new Error("Copy was blocked by the browser");
+};
+
+export const downloadText = (
+  value: string,
+  filename: string,
+  type = "text/plain",
+): void => {
+  const url = URL.createObjectURL(new Blob([value], { type }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+};
+
+export const emit = <T>(
+  target: EventTarget,
+  type: string,
+  detail?: T,
+): void => {
+  target.dispatchEvent(
+    new CustomEvent(type, { detail, bubbles: true, composed: true }),
+  );
+};
+
+export const friendlyError = (error: any): string => {
+  const detail =
+    error?.message || error?.body?.message || error?.error || String(error);
+  const value = detail.toLowerCase();
+  if (value.includes("timeout") || value.includes("timed out"))
+    return "No signal arrived before the capture window ended.";
+  if (
+    value.includes("emitter") &&
+    (value.includes("unavailable") || value.includes("not configured"))
+  )
+    return "The selected IR emitter is unavailable.";
+  if (value.includes("empty") || value.includes("no code"))
+    return "The receiver returned no IR code.";
+  if (
+    value.includes("send") ||
+    value.includes("delivery") ||
+    value.includes("dispatch")
+  )
+    return "The command could not be sent. Check the emitter and retry.";
+  if (value.includes("storage") || value.includes("save"))
+    return "The command could not be saved. Your work is still available.";
+  return detail;
+};
+
+export const compatibilityLabel = (
+  signal: any,
+  analysis: AnalysisData = {},
+): string => {
+  const warnings = analysis.warnings || [];
+  if (!Array.isArray(signal?.timings) || !signal.timings.length)
+    return "Not evaluated";
+  if (
+    warnings.includes("carrier_frequency_mismatch") ||
+    warnings.includes("provided_carrier_mismatch")
+  )
+    return "Timings fit; carrier may differ";
+  return "Timing payload fits";
+};

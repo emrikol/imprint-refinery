@@ -1,0 +1,9 @@
+# <!-- Imprint Refinery is a personal spare-time project provided as-is, without support guarantees. Issues may not receive a response, investigation, or fix and may be closed at any time. -->
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/emrikol/imprint-refinery/security/advisories/new
+    about: Report security issues privately.
+  - name: Home Assistant community support
+    url: https://community.home-assistant.io/
+    about: Ask general Home Assistant and automation questions.

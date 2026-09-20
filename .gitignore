@@ -1,0 +1,43 @@
+# Python / Home Assistant
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Home Assistant runtime data
+.storage/
+home-assistant.log*
+deps/
+tts/
+
+# Frontend dependencies and builds
+node_modules/
+dist/
+build/
+coverage/
+.catalog-work/
+
+# Local environments and editor state
+.local/
+.venv/
+.venv314/
+venv/
+.env
+.env.*
+!.env.example
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Private workspace records; never publish these from the public repository.
+.impeccable/
+TODO.md
+docs/ACCEPTANCE-MATRIX.md

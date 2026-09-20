@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Imprint Refinery browser fixture</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --primary-background-color: #0d1117;
+        --secondary-background-color: #20252d;
+        --card-background-color: #181d24;
+        --primary-text-color: #f4f6f8;
+        --secondary-text-color: #aab2bd;
+        --text-primary-color: #07161a;
+        --divider-color: #343b45;
+        --primary-color: #52c7df;
+        --success-color: #62c98a;
+        --warning-color: #efb85b;
+        --error-color: #ef6b73;
+        --disabled-color: #717985;
+        --ha-card-border-radius: 0;
+        font-family: Inter, Roboto, ui-sans-serif, system-ui, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-height: 100%; background: var(--primary-background-color); }
+      body { color: var(--primary-text-color); }
+      ha-card { display: block; min-height: 100dvh; background: var(--primary-background-color); color: var(--primary-text-color); }
+      ha-icon { display: inline-grid; width: 1em; height: 1em; place-items: center; line-height: 1; }
+      ha-icon::before { content: "◆"; font-size: .68em; }
+      .fixture-shell { min-height: 100dvh; padding: 18px 24px 40px; }
+      .fixture-title { height: 46px; margin: -18px -24px 20px; padding: 0 24px; display: flex; align-items: center; border-bottom: 1px solid var(--divider-color); background: #191e25; font-weight: 700; }
+      @media (max-width: 720px) {
+        .fixture-shell { padding: 12px; }
+        .fixture-title { margin: -12px -12px 12px; padding: 0 14px; }
+      }
+    </style>
+    <script type="module">
+      if (!customElements.get("ha-card")) customElements.define("ha-card", class extends HTMLElement {});
+      if (!customElements.get("ha-icon")) customElements.define("ha-icon", class extends HTMLElement {});
+    </script>
+    <script type="module" src="/custom_components/imprint_refinery/www/imprint-refinery-card.js"></script>
+  </head>
+  <body>
+    <main id="preview"></main>
+    <script type="module" src="/tools/browser-fixtures/fixtures.js"></script>
+  </body>
+</html>

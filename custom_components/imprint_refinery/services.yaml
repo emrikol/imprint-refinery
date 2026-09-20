@@ -1,0 +1,12 @@
+# Only deliberate automation actions belong here. Panel CRUD, capture, catalog,
+# conversion, and inspection operations use the authenticated WebSocket API.
+send_command:
+  target:
+    entity:
+      integration: imprint_refinery
+      domain: remote
+  fields:
+    command_id:
+      required: true
+      selector:
+        text:

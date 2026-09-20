@@ -1,0 +1,17 @@
+{
+  "name": "HARCToolbox IrpProtocols.xml",
+  "repository": "https://github.com/bengtmartensson/IrpTransmogrifier",
+  "revision": "c945e7638355ca5697f458d33338ee1bfd4d1640",
+  "path": "src/main/resources/IrpProtocols.xml",
+  "sha256": "fc9d3c5b978ee8dcc2873f0306df072f5c5619c0587f931cc22b70a99cb293ee",
+  "protocol_count": 219,
+  "decodable_count": 215,
+  "non_decodable": [
+    "Fujitsu_Aircon_old",
+    "NEC-Shirriff",
+    "RTI_Relay_alt",
+    "Zenith"
+  ],
+  "source_notice": "Copying and distribution of this file, with or without modification, are permitted in any medium without royalty provided the copyright notice and this notice are preserved. This file is offered as-is, without any warranty.",
+  "runtime_policy": "The GPL-3.0 Java engine is a build-time oracle only and is not shipped or required by Home Assistant."
+}

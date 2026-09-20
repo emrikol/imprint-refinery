@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "catalog_version": "2026.09.17.2",
+  "sources": [
+    {
+      "id": "flipper_irdb",
+      "name": "Flipper-IRDB",
+      "repository": "https://github.com/Lucaslhm/Flipper-IRDB",
+      "revision": "d126fb1b6f1e114c52b4a8c19839ea65e3a9c24d",
+      "license": "CC0-1.0",
+      "license_file": "LICENSE",
+      "license_sha256": "f4e7f373b9b996950337e8d41a4a2939c2d90b7725e9baf3d5084a22717ad328",
+      "tree_sha256": "d67721f3b2acafbb03f05ea671af75c4b647c49aa68fc0231469556e4cc5f61e",
+      "include": "**/*.ir",
+      "attribution": "Flipper-IRDB contributors"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+# <!-- Imprint Refinery is a personal spare-time project provided as-is, without support guarantees. Issues may not receive a response, investigation, or fix and may be closed at any time. -->
+name: Bug report
+description: Report a reproducible problem with Imprint Refinery
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Remove private data from logs and exports before attaching them.
+  - type: input
+    id: version
+    attributes:
+      label: Imprint Refinery version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: home_assistant_version
+    attributes:
+      label: Home Assistant version
+      placeholder: 2026.9.0
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: IR blaster
+      description: Include the model and manufacturer shown by Home Assistant.
+      placeholder: TS1201 / MOES UFO-R11
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      description: List the smallest sequence of steps that shows the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste a short, redacted excerpt. Do not include tokens, device addresses, or exported command libraries.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched the existing issues for this problem.
+          required: true
+        - label: I removed private data from this report.
+          required: true

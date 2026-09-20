@@ -1,0 +1,33 @@
+# <!-- Imprint Refinery is a personal spare-time project provided as-is, without support guarantees. Issues may not receive a response, investigation, or implementation and may be closed at any time. -->
+name: Feature request
+description: Suggest a focused improvement to Imprint Refinery
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the task that is difficult or impossible today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain what you would expect Imprint Refinery to do.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Share any workaround you use now.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched the existing issues for a similar request.
+          required: true
