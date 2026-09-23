@@ -7,9 +7,12 @@ updates:
     cooldown:
       default-days: 7
     ignore:
-      # This must match Home Assistant's built-in infrared integration.
+      # Home Assistant owns this version through its built-in infrared integration.
       - dependency-name: infrared-protocols
-        update-types: [version-update:semver-major]
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+          - version-update:semver-patch
     labels:
       - dependencies
 

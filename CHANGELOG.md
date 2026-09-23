@@ -6,6 +6,7 @@
   bounded GIRR parsing, the release commit guard, and direct lint checks.
 - Disable npm dependency lifecycle scripts and pin JavaScript tooling exactly.
 - Test against Home Assistant 2026.9.2 and update esbuild to 0.28.2.
+- Keep the infrared protocol test library pinned to Home Assistant's version.
 
 ## 0.1.0 - 2026-09-22
 
