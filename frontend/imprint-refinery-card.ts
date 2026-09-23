@@ -38,7 +38,7 @@ import "./components/signal-lab";
 import "./components/catalog-guided";
 import { homeAssistantUse } from "./components/library/model";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 const GUIDED_SESSION_KEY = "imprint-refinery.guided-session-id";
 const ROUTE_LAB_KEY = "imprint-refinery.route.lab";
 const ROUTE_LEARN_KEY = "imprint-refinery.route.learn";
