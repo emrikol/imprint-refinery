@@ -164,8 +164,11 @@ configuration and troubleshooting steps.
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
-npm ci
-prek run --all-files
+npm ci --ignore-scripts
+python3 -m ruff check .
+python3 -m ruff format --check .
+python3 tools/check_repository.py
+npm run typecheck
 python3 -m pytest -q
 npm run build
 npm run smoke:browser

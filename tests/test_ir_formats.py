@@ -389,6 +389,16 @@ class PortableFormatTests(unittest.TestCase):
         with self.assertRaises(IRFormatError):
             ir_formats.decode_girr("<!DOCTYPE foo><command />")
 
+    def test_girr_rejects_entity_declarations(self) -> None:
+        payload = """<!DOCTYPE command [<!ENTITY value \"+9000 -4500\">]>
+<command><raw><intro>&value;</intro></raw></command>"""
+        with self.assertRaises(IRFormatError):
+            ir_formats.decode_girr(payload)
+
+    def test_girr_rejects_oversized_documents(self) -> None:
+        with self.assertRaises(IRFormatError):
+            ir_formats.decode_girr("<command>" + " " * 2_000_000 + "</command>")
+
     def test_lirc_roundtrip_preserves_trailing_gap(self) -> None:
         encoded = ir_formats.encode_lirc_command(
             self.signal,

@@ -6,6 +6,10 @@ updates:
       interval: monthly
     cooldown:
       default-days: 7
+    ignore:
+      # This must match Home Assistant's built-in infrared integration.
+      - dependency-name: infrared-protocols
+        update-types: [version-update:semver-major]
     labels:
       - dependencies
 
@@ -24,5 +28,9 @@ updates:
       interval: monthly
     cooldown:
       default-days: 7
+    ignore:
+      # TypeScript 7 adds a native package for every supported platform.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
     labels:
       - dependencies
