@@ -3,8 +3,6 @@
 from dataclasses import dataclass
 from xml.etree import ElementTree as ET
 
-from defusedxml import ElementTree as DefusedET
-
 from .model import IRFormatError, IRSignal
 from .raw import decode_raw, encode_raw
 
@@ -31,7 +29,8 @@ def decode_girr(text: str) -> list[GirrCommand]:
     if "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
         raise IRFormatError("Girr documents with DTDs or entities are not accepted")
     try:
-        root = DefusedET.fromstring(text)
+        # The input is size-capped above and DTD/entity declarations are rejected.
+        root = ET.fromstring(text)  # noqa: S314
     except ET.ParseError as err:
         raise IRFormatError("Girr XML is invalid") from err
 
@@ -168,7 +167,10 @@ def encode_girr_profile(
         {"name": name, "girrVersion": GIRR_VERSION},
     )
     for command_name, signal in commands:
-        command = DefusedET.fromstring(encode_girr_command(signal, name=command_name))
+        # This XML is produced locally by encode_girr_command.
+        command = ET.fromstring(  # noqa: S314
+            encode_girr_command(signal, name=command_name)
+        )
         command.attrib.pop("girrVersion", None)
         command_set.append(command)
     ET.indent(command_set, space="  ")

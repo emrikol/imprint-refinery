@@ -17,7 +17,7 @@ desktop and phone widths. Remove this section when it does not apply.
 
 ## Validation
 
-- [ ] `prek run --all-files` passes.
+- [ ] Ruff, repository hygiene, and TypeScript checks pass.
 - [ ] `python3 -m pytest -q` passes.
 - [ ] `npm run build` passes.
 - [ ] Browser acceptance passes for frontend changes.

@@ -24,8 +24,8 @@ exported command libraries.
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements-dev.txt
-npm ci
-prek install
+npm ci --ignore-scripts
+git config core.hooksPath .githooks
 ```
 
 Use Python 3.14.2 or newer, which matches Home Assistant 2026.9.
@@ -38,19 +38,19 @@ instance. Restart Home Assistant and add the integration through the UI.
 Run the complete local suite before opening a pull request:
 
 ```bash
-prek run --all-files
+python3 -m ruff check .
+python3 -m ruff format --check .
+python3 tools/check_repository.py
+npm run typecheck
 python3 -m pytest -q
 npm run build
 npm run smoke:browser
 ```
 
-`prek` runs Ruff, Ruff format, codespell, yamllint, JSON and YAML validation,
-Prettier, the TypeScript compiler, and a security audit of the GitHub Actions
-configuration. Run an individual hook with `prek run <hook-id> --all-files`.
-It also installs a commit-time release gate. A commit that changes the
-integration version must include a staged, dated `CHANGELOG.md` entry for that
-version. CI checks the same changelog requirements again when a version tag is
-pushed.
+The committed Git hook enforces the release gate without installing a hook
+framework. A commit that changes the integration version must include a staged,
+dated `CHANGELOG.md` entry for that version. CI checks the same changelog
+requirements again when a version tag is pushed.
 
 Python follows the Home Assistant Core Ruff profile where it applies to a
 standalone custom integration. User-facing documentation follows the

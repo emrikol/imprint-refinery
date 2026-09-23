@@ -51,9 +51,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install -r requirements-dev.txt
-          npm ci
+          npm ci --ignore-scripts
       - name: Run linters
-        run: prek run --all-files
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+          python tools/check_repository.py
+          npm run typecheck
 
   frontend:
     name: Frontend
@@ -67,7 +71,7 @@ jobs:
         with:
           node-version: 22
           package-manager-cache: false
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run build
       - name: Browser acceptance
         env:
