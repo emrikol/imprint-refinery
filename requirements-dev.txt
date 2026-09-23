@@ -1,4 +1,4 @@
 homeassistant==2026.9.2
-infrared-protocols==9.0.0
+infrared-protocols==9.1.0
 pytest==9.1.1
 ruff==0.16.7
