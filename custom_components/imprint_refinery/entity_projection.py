@@ -1,8 +1,8 @@
-"""Turn signal-library appliances into Home Assistant entity blueprints."""
+"""Turn appliances and remote profiles into Home Assistant entity blueprints."""
 
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote
 
 from .capabilities import COMMAND_FEATURE_SET, CommandCapabilities, infer_capabilities
 
@@ -13,51 +13,48 @@ BUTTON_PLATFORM = "button"
 AUTOMATIC_PLATFORM = "auto"
 
 
+def appliance_configuration_url(appliance_id: str) -> str:
+    """Return the canonical Home Assistant deep link for one appliance."""
+    return "homeassistant://navigate/imprint-refinery/appliances/" + quote(
+        appliance_id, safe=""
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class EntityBlueprint:
     """Everything needed to construct one projected Home Assistant entity."""
 
     platform: str
     entity_key: str
-    location: str
     appliance: str
+    remote_profile: str
     title: str
-    emitter: str | None
+    emitter: str
     commands: tuple[str, ...]
     roles: dict[str, str]
     abilities: CommandCapabilities
-    area_name: str | None = None
     command_id: str | None = None
     entity_name: str | None = None
     icon: str | None = None
 
     @property
     def registry_device_key(self) -> str:
-        return f"{self.location}__{self.appliance}"
+        return self.appliance
 
     @property
     def configuration_url(self) -> str:
-        query = urlencode(
-            {
-                "screen": "library",
-                "location": self.location,
-                "appliance": self.appliance,
-            }
-        )
-        return f"homeassistant://navigate/imprint-refinery?{query}"
+        return appliance_configuration_url(self.appliance)
 
 
 def _command_summaries(commands: dict[str, Any]) -> list[dict[str, Any]]:
-    summaries: list[dict[str, Any]] = []
-    for key, command in commands.items():
-        summaries.append(
-            {
-                "command_id": key,
-                "role": command.get("role"),
-                "name": command.get("name") or key,
-            }
-        )
-    return summaries
+    return [
+        {
+            "command_id": key,
+            "role": command.get("role"),
+            "name": command.get("name") or key,
+        }
+        for key, command in commands.items()
+    ]
 
 
 def _role_index(commands: dict[str, Any]) -> dict[str, str]:
@@ -90,7 +87,6 @@ def _represented_command_ids(
     roles: dict[str, str],
     abilities: CommandCapabilities,
 ) -> set[str]:
-    """Return commands already exposed as first-class controls by a platform."""
     represented: set[str] = set()
     if abilities.power_control.value != "absent":
         represented.update(
@@ -100,7 +96,6 @@ def _represented_command_ids(
         )
     if platform != MEDIA_PLATFORM:
         return represented
-
     media_roles: set[str] = set()
     for control in abilities.media_controls:
         if control == "pause":
@@ -120,99 +115,82 @@ def _represented_command_ids(
 
 
 def _appliance_blueprint(
-    location_key: str,
-    location: dict[str, Any],
-    appliance_key: str,
+    appliance_id: str,
     appliance: dict[str, Any],
+    remote_profile_id: str,
+    profile: dict[str, Any],
 ) -> EntityBlueprint:
-    commands = appliance.get("commands", {})
+    commands = profile.get("commands", {})
     abilities = infer_capabilities(_command_summaries(commands))
     platform = _platform_for(
         str(appliance.get("preferred_platform") or AUTOMATIC_PLATFORM),
-        str(appliance.get("appliance_type") or "generic"),
+        str(profile.get("appliance_type") or "generic"),
         abilities,
     )
-    entity_key = f"{location_key}__{appliance_key}"
+    entity_key = appliance_id
     if platform == SWITCH_PLATFORM:
         entity_key += "__switch"
     return EntityBlueprint(
         platform=platform,
         entity_key=entity_key,
-        location=location_key,
-        appliance=appliance_key,
-        title=str(appliance.get("name") or appliance_key),
-        emitter=appliance.get("emitter_id") or None,
+        appliance=appliance_id,
+        remote_profile=remote_profile_id,
+        title=str(appliance.get("name") or appliance_id),
+        emitter=str(appliance["infrared_emitter_ref"]),
         commands=tuple(sorted(commands)),
         roles=_role_index(commands),
         abilities=abilities,
-        area_name=(
-            str(location.get("name") or location_key)
-            if location_key != "unsorted"
-            else None
-        ),
     )
 
 
 def project_library(document: dict[str, Any]) -> list[EntityBlueprint]:
-    """Create a stable entity plan from a library document."""
+    """Create a stable entity plan for every fully assigned appliance."""
+    profiles = document.get("remote_profiles", {})
     plan: list[EntityBlueprint] = []
-    locations = document.get("locations", {})
-    for location_key in sorted(locations):
-        location = locations[location_key]
-        appliances = location.get("appliances", {})
-        for appliance_key in sorted(appliances):
-            appliance = appliances[appliance_key]
-            plan.append(
-                _appliance_blueprint(location_key, location, appliance_key, appliance)
-            )
+    for appliance_id, appliance in sorted(document.get("appliances", {}).items()):
+        profile_id = appliance.get("remote_profile_id")
+        emitter_ref = appliance.get("infrared_emitter_ref")
+        profile = profiles.get(profile_id)
+        if not profile_id or not emitter_ref or not isinstance(profile, dict):
+            continue
+        plan.append(_appliance_blueprint(appliance_id, appliance, profile_id, profile))
     return plan
 
 
 def project_command_buttons(document: dict[str, Any]) -> list[EntityBlueprint]:
     """Project commands without a native semantic control as button entities."""
+    profiles = document.get("remote_profiles", {})
     plan: list[EntityBlueprint] = []
-    locations = document.get("locations", {})
-    for location_key in sorted(locations):
-        location = locations[location_key]
-        for appliance_key in sorted(location.get("appliances", {})):
-            appliance = location["appliances"][appliance_key]
-            primary = _appliance_blueprint(
-                location_key, location, appliance_key, appliance
-            )
-            represented = _represented_command_ids(
-                primary.platform, primary.roles, primary.abilities
-            )
-            commands = appliance.get("commands", {})
-            for command_id in sorted(commands):
-                if command_id in represented:
-                    continue
-                command = commands[command_id]
-                plan.append(
-                    EntityBlueprint(
-                        platform=BUTTON_PLATFORM,
-                        entity_key=(
-                            f"{location_key}__{appliance_key}__command__{command_id}"
-                        ),
-                        location=location_key,
-                        appliance=appliance_key,
-                        title=primary.title,
-                        emitter=primary.emitter,
-                        commands=(command_id,),
-                        roles={},
-                        abilities=primary.abilities,
-                        area_name=primary.area_name,
-                        command_id=command_id,
-                        entity_name=str(command.get("name") or command_id),
-                        icon=str(command.get("icon") or "mdi:remote"),
-                    )
+    for primary in project_library(document):
+        represented = _represented_command_ids(
+            primary.platform, primary.roles, primary.abilities
+        )
+        commands = profiles[primary.remote_profile].get("commands", {})
+        for command_id, command in sorted(commands.items()):
+            if command_id in represented:
+                continue
+            plan.append(
+                EntityBlueprint(
+                    platform=BUTTON_PLATFORM,
+                    entity_key=(f"{primary.appliance}__command__{command_id}"),
+                    appliance=primary.appliance,
+                    remote_profile=primary.remote_profile,
+                    title=primary.title,
+                    emitter=primary.emitter,
+                    commands=(command_id,),
+                    roles={},
+                    abilities=primary.abilities,
+                    command_id=command_id,
+                    entity_name=str(command.get("name") or command_id),
+                    icon=str(command.get("icon") or "mdi:remote"),
                 )
+            )
     return plan
 
 
 def project_platform(
     document: dict[str, Any], platform: str
 ) -> dict[str, EntityBlueprint]:
-    """Index the blueprints belonging to one Home Assistant platform."""
     source = (
         project_command_buttons(document)
         if platform == BUTTON_PLATFORM

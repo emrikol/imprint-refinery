@@ -43,22 +43,20 @@ def _registry() -> dict:
     append_revision(command, created_at="t2", action="replaced")
     set_revision_label(command, 1, "Original remote")
     return {
-        "version": 6,
-        "emitters": {
-            "private": {"ieee": "00:11:22:33:44:55:66:77"},
+        "version": 3,
+        "remote_profiles": {
+            "television_profile": {
+                "name": "Television",
+                "appliance_type": "television",
+                "commands": {"power": command},
+            }
         },
-        "locations": {
-            "living_room": {
-                "name": "Living room",
-                "appliances": {
-                    "television": {
-                        "name": "Television",
-                        "appliance_type": "television",
-                        "preferred_platform": "media_player",
-                        "emitter_id": "private",
-                        "commands": {"power": command},
-                    }
-                },
+        "appliances": {
+            "living_room_television": {
+                "name": "Television",
+                "remote_profile_id": "television_profile",
+                "preferred_platform": "media_player",
+                "infrared_emitter_ref": "00000000000000000000000000000001",
             }
         },
     }
@@ -68,13 +66,12 @@ class NativeBackupTests(unittest.TestCase):
     def test_full_history_roundtrip_is_portable_and_lossless(self) -> None:
         exported = export_backup(
             _registry(),
-            location_id="living_room",
-            appliance_id="television",
+            remote_profile_id="television_profile",
             include_history=True,
         )
         serialized = json.dumps(exported)
 
-        self.assertNotIn("emitters", serialized)
+        self.assertNotIn("infrared_emitter_ref", serialized)
         self.assertNotIn("source_command", serialized)
         self.assertNotIn("00:11:22", serialized)
 
@@ -85,6 +82,39 @@ class NativeBackupTests(unittest.TestCase):
         self.assertEqual(len(command["revisions"]), 2)
         self.assertEqual(command["revision_labels"]["1"], "Original remote")
         self.assertEqual(command["signal"]["timings"][-1], 1690)
+
+    def test_legacy_backup_becomes_one_profile_per_appliance(self) -> None:
+        command = {
+            "name": "Power",
+            "code": "+9000 -4500 +560 -560",
+            "format": "raw_signed",
+        }
+        legacy = {
+            "schema": "imprint_refinery.backup",
+            "version": 1,
+            "scope": "library",
+            "history": "current",
+            "command_count": 1,
+            "locations": {
+                "room": {
+                    "name": "Room",
+                    "appliances": {
+                        "fan": {
+                            "name": "Fan",
+                            "commands": {"power": command},
+                        }
+                    },
+                }
+            },
+        }
+
+        inspected = inspect_backup(legacy)
+
+        self.assertIn("room__fan", inspected["remote_profiles"])
+        self.assertEqual(
+            inspected["appliances"]["room__fan"]["remote_profile_id"],
+            "room__fan",
+        )
 
     def test_current_only_backup_creates_one_import_revision(self) -> None:
         exported = export_backup(_registry(), include_history=False)

@@ -243,16 +243,14 @@ def prepare_profile_import(
     profile_id: str,
     *,
     registry_data: Mapping[str, Any] | None = None,
-    location_id: str | None = None,
-    appliance_id: str | None = None,
+    remote_profile_id: str | None = None,
 ) -> dict[str, Any]:
     """Return an import preview with starter, conflict, and duplicate metadata."""
     profile = deepcopy(get_profile(profile_id))
     existing_commands = list(_registry_commands(registry_data or {}))
     target_commands = _target_commands(
         registry_data or {},
-        location_id=location_id,
-        appliance_id=appliance_id,
+        remote_profile_id=remote_profile_id,
     )
     starter_ids: list[str] = []
     duplicate_count = 0
@@ -294,9 +292,7 @@ def prepare_profile_import(
         "duplicate_count": duplicate_count,
         "unsupported_count": len(profile["unsupported_commands"]),
         "target": (
-            {"location_id": location_id, "appliance_id": appliance_id}
-            if location_id and appliance_id
-            else None
+            {"remote_profile_id": remote_profile_id} if remote_profile_id else None
         ),
         "provenance": deepcopy(profile["source"]),
     }
@@ -306,67 +302,47 @@ def prepare_profile_import(
 def _target_commands(
     registry_data: Mapping[str, Any],
     *,
-    location_id: str | None,
-    appliance_id: str | None,
+    remote_profile_id: str | None,
 ) -> Mapping[str, Any]:
-    if not location_id or not appliance_id:
+    if not remote_profile_id:
         return {}
-    locations = registry_data.get("locations", {})
-    if not isinstance(locations, Mapping):
+    profiles = registry_data.get("remote_profiles", {})
+    if not isinstance(profiles, Mapping):
         return {}
-    location = locations.get(location_id, {})
-    if not isinstance(location, Mapping):
+    profile = profiles.get(remote_profile_id, {})
+    if not isinstance(profile, Mapping):
         return {}
-    appliances = location.get("appliances", {})
-    if not isinstance(appliances, Mapping):
-        return {}
-    appliance = appliances.get(appliance_id, {})
-    if not isinstance(appliance, Mapping):
-        return {}
-    commands = appliance.get("commands", {})
+    commands = profile.get("commands", {})
     return commands if isinstance(commands, Mapping) else {}
 
 
 def _registry_commands(
     registry_data: Mapping[str, Any],
-) -> list[tuple[str, str, str, Mapping[str, Any]]]:
+) -> list[tuple[str, str, Mapping[str, Any]]]:
     result = []
-    locations = registry_data.get("locations", {})
-    if not isinstance(locations, Mapping):
+    profiles = registry_data.get("remote_profiles", {})
+    if not isinstance(profiles, Mapping):
         return result
-    for location_id, location in locations.items():
-        if not isinstance(location, Mapping):
+    for remote_profile_id, profile in profiles.items():
+        if not isinstance(profile, Mapping):
             continue
-        appliances = location.get("appliances", {})
-        if not isinstance(appliances, Mapping):
+        commands = profile.get("commands", {})
+        if not isinstance(commands, Mapping):
             continue
-        for appliance_id, appliance in appliances.items():
-            if not isinstance(appliance, Mapping):
-                continue
-            commands = appliance.get("commands", {})
-            if not isinstance(commands, Mapping):
-                continue
-            for command_id, command in commands.items():
-                if isinstance(command, Mapping):
-                    result.append(
-                        (
-                            str(location_id),
-                            str(appliance_id),
-                            str(command_id),
-                            command,
-                        )
-                    )
+        for command_id, command in commands.items():
+            if isinstance(command, Mapping):
+                result.append((str(remote_profile_id), str(command_id), command))
     return result
 
 
 def _command_duplicates(
     candidate: Mapping[str, Any],
-    existing_commands: list[tuple[str, str, str, Mapping[str, Any]]],
+    existing_commands: list[tuple[str, str, Mapping[str, Any]]],
 ) -> list[dict[str, str]]:
     candidate_fingerprint = _normalized_fingerprint(candidate)
     candidate_code = candidate.get("code")
     duplicates = []
-    for location_id, appliance_id, command_id, command in existing_commands:
+    for remote_profile_id, command_id, command in existing_commands:
         match_basis = None
         existing_fingerprint = _normalized_fingerprint(command)
         if candidate_fingerprint and candidate_fingerprint == existing_fingerprint:
@@ -376,8 +352,7 @@ def _command_duplicates(
         if match_basis:
             duplicates.append(
                 {
-                    "location_id": location_id,
-                    "appliance_id": appliance_id,
+                    "remote_profile_id": remote_profile_id,
                     "command_id": command_id,
                     "name": str(command.get("name", command_id)),
                     "match_basis": match_basis,

@@ -1,157 +1,155 @@
-"""Hardware-neutral routing through Home Assistant's infrared contract."""
+"""Read-only discovery of Home Assistant Core infrared hardware."""
 
-import asyncio
+from collections.abc import Iterable, Mapping
+import logging
 from typing import Any
 
 from homeassistant.components import infrared
-from homeassistant.components.infrared import InfraredReceivedSignal
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import device_registry as dr, entity_registry as er
-
-from .const import (
-    DOMAIN,
-    ERROR_CAPTURE_FAILED,
-    ERROR_CAPTURE_TIMEOUT,
-    ERROR_EMITTER_UNAVAILABLE,
-    HOME_ASSISTANT_IR,
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import (
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
 )
+
+from .const import DOMAIN, ZHA_BRIDGE
+from .emitter_identity import normalize_emitter_ref
 from .errors import ImprintRefineryError
-from .ir_formats import DEFAULT_CARRIER_HZ, IRSignal
-from .signal_command import RawSignalCommand
-from .zha_bridge import ZhaBridge
+from .zha_bridge import discover_zha_driver, zha_proxy
+
+_LOGGER = logging.getLogger(__name__)
 
 
-class InfraredHardware:
-    """Route canonical signals without exposing vendor payloads to the core."""
+def _device_entries(registry: dr.DeviceRegistry) -> Iterable[dr.DeviceEntry]:
+    devices = registry.devices
+    return devices.values() if isinstance(devices, Mapping) else devices
 
-    def __init__(self, hass: HomeAssistant) -> None:
-        self._hass = hass
-        self._zha = ZhaBridge(hass)
 
-    async def send(self, emitter: dict[str, Any], signal: IRSignal) -> None:
-        """Send one signal using a native HA entity or a compatibility bridge."""
-        if emitter.get("transport") == HOME_ASSISTANT_IR:
-            reference = emitter.get("entity_id")
-            if not reference:
-                raise ImprintRefineryError(
-                    ERROR_EMITTER_UNAVAILABLE,
-                    "Infrared emitter entity is not configured",
-                )
-            await infrared.async_send_command(
-                self._hass,
-                str(reference),
-                RawSignalCommand(signal),
-            )
-            return
-        await self._zha.send(emitter, signal)
+def _zha_ieee(device: dr.DeviceEntry) -> str | None:
+    for identifier in device.identifiers:
+        if len(identifier) >= 2 and identifier[0] == "zha":
+            return str(identifier[1]).lower()
+    return None
 
-    async def capture(
-        self,
-        emitter: dict[str, Any],
-        *,
-        timeout: int,
-        poll_interval: int,
-    ) -> tuple[IRSignal, str]:
-        """Capture one signal and return it with carrier provenance."""
-        if emitter.get("transport") != HOME_ASSISTANT_IR:
-            signal = await self._zha.capture(
-                emitter,
-                timeout=timeout,
-                poll_interval=poll_interval,
-            )
-            return signal, self._zha.driver(emitter).carrier_source
 
-        receiver = emitter.get("receiver_entity_id")
-        if not receiver:
-            raise ImprintRefineryError(
-                ERROR_CAPTURE_FAILED,
-                "The selected infrared device does not expose a receiver",
-            )
-        loop = asyncio.get_running_loop()
-        result: asyncio.Future[InfraredReceivedSignal] = loop.create_future()
+def _device_label(device: dr.DeviceEntry, ieee: str) -> str:
+    values = [device.name_by_user or device.name or ieee]
+    values.extend(str(value) for value in (device.manufacturer, device.model) if value)
+    values.append(ieee)
+    return " · ".join(values)
 
-        @callback
-        def received(signal: InfraredReceivedSignal) -> None:
-            if not result.done():
-                result.set_result(signal)
 
-        remove = infrared.async_subscribe_receiver(
-            self._hass,
-            str(receiver),
-            received,
-        )
+async def async_discover_zha_adapter_candidates(
+    hass: HomeAssistant,
+) -> dict[str, dict[str, Any]]:
+    """Return supported ZHA devices that could use the compatibility provider."""
+    result: dict[str, dict[str, Any]] = {}
+    for device in _device_entries(dr.async_get(hass)):
+        ieee = _zha_ieee(device)
+        if ieee is None:
+            continue
         try:
-            captured = await asyncio.wait_for(result, timeout=timeout)
-        except TimeoutError as error:
-            raise ImprintRefineryError(
-                ERROR_CAPTURE_TIMEOUT,
-                f"No new IR signal was captured within {timeout} seconds",
-            ) from error
-        finally:
-            remove()
-        carrier = captured.modulation or DEFAULT_CARRIER_HZ
-        source = "measured" if captured.modulation else "assumed"
-        return IRSignal([abs(value) for value in captured.timings], carrier), source
+            detected = discover_zha_driver(
+                zha_proxy(hass, device.id),
+                manufacturer=device.manufacturer,
+                model=device.model,
+            )
+        except Exception as error:  # noqa: BLE001 - discovery must fail soft.
+            level = (
+                logging.DEBUG
+                if isinstance(error, ImprintRefineryError)
+                else logging.WARNING
+            )
+            _LOGGER.log(level, "Skipping ZHA IR discovery for %s: %s", device.id, error)
+            continue
+        if detected is None:
+            continue
+        driver_id, endpoint_id, cluster_id = detected
+        result[device.id] = {
+            "ieee": ieee,
+            "driver": driver_id,
+            "transport": ZHA_BRIDGE,
+            "endpoint_id": endpoint_id,
+            "cluster_id": cluster_id,
+            "label": _device_label(device, ieee),
+        }
+    return result
 
-    async def stop_capture(self, emitter: dict[str, Any]) -> None:
-        """Stop a bridge capture session during cancellation."""
-        if emitter.get("transport") != HOME_ASSISTANT_IR:
-            await self._zha.stop_capture(emitter)
+
+async def async_compatibility_adapter_available(
+    hass: HomeAssistant,
+    *,
+    configured_emitter_ids: set[str],
+    core_infrared_device_ids: set[str],
+) -> bool:
+    """Report whether supported ZHA hardware still needs a Core provider."""
+    candidates = await async_discover_zha_adapter_candidates(hass)
+    return any(
+        normalize_emitter_ref(str(candidate["ieee"])) not in configured_emitter_ids
+        and device_id not in core_infrared_device_ids
+        for device_id, candidate in candidates.items()
+    )
 
 
-def discover_home_assistant_emitters(hass: HomeAssistant) -> list[dict[str, Any]]:
-    """Describe native HA emitters and a receiver on the same device."""
+def discover_infrared_hardware(hass: HomeAssistant) -> dict[str, list[dict[str, Any]]]:
+    """Return a fresh, read-only inventory of Core infrared entities."""
     registry = er.async_get(hass)
     devices = dr.async_get(hass)
-    receivers_by_device: dict[str, list[Any]] = {}
-    receivers_by_config: dict[str, list[Any]] = {}
-    for entity_id in infrared.async_get_receivers(hass):
-        entry = registry.async_get(entity_id)
-        if entry is None or entry.platform == DOMAIN:
-            continue
-        if entry.device_id:
-            receivers_by_device.setdefault(entry.device_id, []).append(entry)
-        if entry.config_entry_id:
-            receivers_by_config.setdefault(entry.config_entry_id, []).append(entry)
+    areas = ar.async_get(hass)
 
-    discovered: list[dict[str, Any]] = []
-    for entity_id in infrared.async_get_emitters(hass):
+    def describe(entity_id: str) -> dict[str, Any] | None:
         entry = registry.async_get(entity_id)
-        if entry is None or entry.platform == DOMAIN:
-            continue
-        candidates = (
-            receivers_by_device.get(entry.device_id, []) if entry.device_id else []
-        )
-        if not candidates and entry.config_entry_id:
-            config_candidates = receivers_by_config.get(entry.config_entry_id, [])
-            if len(config_candidates) == 1:
-                candidates = config_candidates
-        receiver = (
-            min(candidates, key=lambda item: item.entity_id) if candidates else None
-        )
+        if entry is None:
+            return None
         device = devices.async_get(entry.device_id) if entry.device_id else None
+        area = (
+            areas.async_get_area(device.area_id)
+            if device is not None and device.area_id
+            else None
+        )
         state = hass.states.get(entity_id)
-        display_name = (
-            getattr(device, "name_by_user", None)
-            or getattr(device, "name", None)
-            or getattr(entry, "name", None)
+        name = (
+            getattr(entry, "name", None)
             or getattr(entry, "original_name", None)
+            or getattr(device, "name_by_user", None)
+            or getattr(device, "name", None)
             or (state.name if state is not None else None)
             or entity_id
         )
-        discovered.append(
-            {
-                "key": f"ha_{entry.id.replace('-', '').lower()}",
-                "transport": HOME_ASSISTANT_IR,
-                # Registry UUIDs survive entity renames and are accepted by the
-                # Home Assistant infrared helper API.
-                "entity_id": entry.id,
-                "receiver_entity_id": receiver.id if receiver else None,
-                "name": display_name,
-                "name_authoritative": True,
-                "manufacturer": getattr(device, "manufacturer", None),
-                "model": getattr(device, "model", None),
-                "can_capture": receiver is not None,
-            }
-        )
-    return discovered
+        return {
+            "ref": entry.id,
+            "entity_id": entity_id,
+            "name": name,
+            "available": bool(state is not None and state.state != STATE_UNAVAILABLE),
+            "last_activity": (
+                state.state
+                if state is not None
+                and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+                else None
+            ),
+            "platform": entry.platform,
+            "compatibility_adapter": entry.platform == DOMAIN,
+            "device_id": getattr(device, "id", None),
+            "device_name": (
+                getattr(device, "name_by_user", None) or getattr(device, "name", None)
+            ),
+            "device_url": (
+                f"/config/devices/device/{device.id}" if device is not None else None
+            ),
+            "entity_url": f"/config/entities/entity/{entry.id}",
+            "area_name": getattr(area, "name", None),
+        }
+
+    return {
+        "emitters": [
+            summary
+            for entity_id in infrared.async_get_emitters(hass)
+            if (summary := describe(entity_id)) is not None
+        ],
+        "receivers": [
+            summary
+            for entity_id in infrared.async_get_receivers(hass)
+            if (summary := describe(entity_id)) is not None
+        ],
+    }

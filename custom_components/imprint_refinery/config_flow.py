@@ -1,14 +1,11 @@
 """Single-workspace configuration flow with repeatable emitter subentries."""
 
-from collections.abc import Iterable, Mapping
-import logging
 from typing import Any
 
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
-from homeassistant.helpers import device_registry as dr
 import voluptuous as vol
 
 from .const import (
@@ -30,37 +27,14 @@ from .const import (
     ZHA_BRIDGE,
 )
 from .emitter_identity import normalize_emitter_ref
-from .errors import ImprintRefineryError
-from .zha_bridge import discover_zha_driver, zha_proxy
+from .hardware import async_discover_zha_adapter_candidates
 from .zha_drivers import DEFAULT_ZHA_DRIVER, DRIVERS
 
 MANUAL_DEVICE = "__manual__"
-HOME_ASSISTANT_DEVICE = "__home_assistant_infrared__"
 MANUAL_SETUP_LABEL = "Manual setup"
-HOME_ASSISTANT_SETUP_LABEL = "Use Home Assistant infrared entities"
 _POSITIVE_INT = vol.All(vol.Coerce(int), vol.Range(min=1))
 _ENDPOINT_ID = vol.All(vol.Coerce(int), vol.Range(min=1, max=240))
 _CLUSTER_ID = vol.All(vol.Coerce(int), vol.Range(min=0, max=0xFFFF))
-_LOGGER = logging.getLogger(__name__)
-
-
-def _device_entries(registry: dr.DeviceRegistry) -> Iterable[dr.DeviceEntry]:
-    devices = registry.devices
-    return devices.values() if isinstance(devices, Mapping) else devices
-
-
-def _zha_ieee(device: dr.DeviceEntry) -> str | None:
-    for identifier in device.identifiers:
-        if len(identifier) >= 2 and identifier[0] == "zha":
-            return str(identifier[1]).lower()
-    return None
-
-
-def _device_label(device: dr.DeviceEntry, ieee: str) -> str:
-    values = [device.name_by_user or device.name or ieee]
-    values.extend(str(value) for value in (device.manufacturer, device.model) if value)
-    values.append(ieee)
-    return " · ".join(values)
 
 
 def _manual_setup_label(language: str | None) -> str:
@@ -96,45 +70,18 @@ class _EmitterFlowMixin:
     _discovered: dict[str, dict[str, Any]]
 
     async def _async_discover_zha_emitters(self) -> dict[str, dict[str, Any]]:
-        result: dict[str, dict[str, Any]] = {}
-        for device in _device_entries(dr.async_get(self.hass)):
-            ieee = _zha_ieee(device)
-            if ieee is None:
-                continue
-            try:
-                proxy = zha_proxy(self.hass, device.id)
-                detected = discover_zha_driver(proxy)
-            except Exception as error:  # noqa: BLE001 - discovery must fail soft.
-                level = (
-                    logging.DEBUG
-                    if isinstance(error, ImprintRefineryError)
-                    else logging.WARNING
-                )
-                _LOGGER.log(
-                    level, "Skipping ZHA IR discovery for %s: %s", device.id, error
-                )
-                continue
-            if detected is None:
-                continue
-            driver_id, endpoint_id, cluster_id = detected
-            result[device.id] = {
-                "ieee": ieee,
-                "driver": driver_id,
-                "transport": ZHA_BRIDGE,
-                "endpoint_id": endpoint_id,
-                "cluster_id": cluster_id,
-                "label": _device_label(device, ieee),
-            }
-        return result
+        return await async_discover_zha_adapter_candidates(self.hass)
 
-    def _async_emitter_choice_form(self, errors: dict[str, str]) -> FlowResult:
+    def _async_emitter_choice_form(
+        self,
+        errors: dict[str, str],
+    ) -> FlowResult:
         choices = {
             device_id: data["label"]
             for device_id, data in sorted(
                 self._discovered.items(), key=lambda item: item[1]["label"].casefold()
             )
         }
-        choices[HOME_ASSISTANT_DEVICE] = HOME_ASSISTANT_SETUP_LABEL
         choices[MANUAL_DEVICE] = _manual_setup_label(self.hass.config.language)
         return self.async_show_form(
             step_id="user",
@@ -212,43 +159,10 @@ class ImprintRefineryConfigFlow(
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        del user_input
         if self._async_current_entries():
             return self.async_abort(reason="single_instance_allowed")
-        self._discovered = await self._async_discover_zha_emitters()
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            if user_input[CONF_DEVICE] == HOME_ASSISTANT_DEVICE:
-                return self.async_create_entry(title=HUB_TITLE, data=HUB_ENTRY_DATA)
-            if user_input[CONF_DEVICE] == MANUAL_DEVICE:
-                return await self.async_step_manual()
-            if selected := self._selected_emitter(user_input):
-                return self._async_create_hub_entry(selected)
-            errors[CONF_DEVICE] = "device_not_found"
-        return self._async_emitter_choice_form(errors)
-
-    async def async_step_manual(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        return (
-            self._async_create_hub_entry(user_input)
-            if user_input is not None
-            else self._async_manual_form({})
-        )
-
-    def _async_create_hub_entry(self, data: dict[str, Any]) -> FlowResult:
-        normalized = self._normalize_emitter_input(data)
-        return self.async_create_entry(
-            title=HUB_TITLE,
-            data=HUB_ENTRY_DATA,
-            subentries=[
-                {
-                    "data": normalized,
-                    "subentry_type": EMITTER_SUBENTRY_TYPE,
-                    "title": self._emitter_title(data),
-                    "unique_id": normalize_emitter_ref(normalized[CONF_IEEE]),
-                }
-            ],
-        )
+        return self.async_create_entry(title=HUB_TITLE, data=HUB_ENTRY_DATA)
 
 
 class ImprintRefineryEmitterSubentryFlow(
@@ -263,8 +177,6 @@ class ImprintRefineryEmitterSubentryFlow(
         self._discovered = await self._async_discover_zha_emitters()
         errors: dict[str, str] = {}
         if user_input is not None:
-            if user_input[CONF_DEVICE] == HOME_ASSISTANT_DEVICE:
-                return self.async_abort(reason="infrared_entities_auto_discovered")
             if user_input[CONF_DEVICE] == MANUAL_DEVICE:
                 return await self.async_step_manual()
             if selected := self._selected_emitter(user_input):

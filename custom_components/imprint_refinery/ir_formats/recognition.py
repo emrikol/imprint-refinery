@@ -14,13 +14,14 @@ from typing import Any
 from .model import IRSignal
 from .protocols.known import KNOWN_PROTOCOLS, rebuild_known_protocol
 
-RECOGNIZER_VERSION = "common-protocols-4+home-assistant-infrared-protocols-3"
+RECOGNIZER_VERSION = "common-protocols-5+home-assistant-infrared-protocols-4"
 
 _ABSOLUTE_TOLERANCE_US = 150
 _RELATIVE_TOLERANCE = 0.22
 _FRAME_GAP_US = 10_000
 _MAX_RECOGNITION_TIMINGS = 4096
 _CACHE_SIZE = 128
+_REBUILD_EQUIVALENCE_TOLERANCE_US = 10
 _BUILTIN_PROTOCOLS = KNOWN_PROTOCOLS
 
 
@@ -1212,8 +1213,7 @@ def _prepare_protocol_rebuilds(
     list[dict[str, Any]], dict[str, tuple[int, tuple[int, ...], dict[str, Any]]]
 ]:
     """Expose compact capabilities while retaining waveforms only in cache."""
-    descriptors: list[dict[str, Any]] = []
-    signals: dict[str, tuple[int, tuple[int, ...], dict[str, Any]]] = {}
+    reconstructable: list[tuple[dict[str, Any], str, IRSignal]] = []
     for candidate in candidates:
         identity = _candidate_identity(candidate)
         candidate_id = hashlib.sha256(
@@ -1240,6 +1240,33 @@ def _prepare_protocol_rebuilds(
         if rebuilt is None:
             continue
 
+        reconstructable.append((candidate, candidate_id, rebuilt))
+
+    descriptors: list[dict[str, Any]] = []
+    signals: dict[str, tuple[int, tuple[int, ...], dict[str, Any]]] = {}
+    for candidate, candidate_id, rebuilt in sorted(
+        reconstructable,
+        key=lambda item: _rebuild_preference(item[0]),
+    ):
+        equivalent_id = next(
+            (
+                rebuild_id
+                for rebuild_id, (carrier, timings, _descriptor) in signals.items()
+                if _rebuild_signals_equivalent(
+                    rebuilt,
+                    IRSignal(list(timings), carrier),
+                )
+            ),
+            None,
+        )
+        if equivalent_id is not None:
+            candidate["rebuild_id"] = equivalent_id
+            equivalent = signals[equivalent_id][2]
+            equivalent["equivalent_interpretation_count"] = (
+                int(equivalent.get("equivalent_interpretation_count", 1)) + 1
+            )
+            continue
+
         rebuild_id = hashlib.sha256(
             (
                 f"{candidate_id}\0{rebuilt.carrier_frequency}\0"
@@ -1260,6 +1287,7 @@ def _prepare_protocol_rebuilds(
             "timing_count": len(rebuilt.timings),
             "changed_timings": changed,
             "duration_delta_us": sum(rebuilt.timings) - sum(source.timings),
+            "equivalent_interpretation_count": 1,
             **{
                 field: candidate[field]
                 for field in ("address", "command", "toggle", "bits")
@@ -1274,6 +1302,32 @@ def _prepare_protocol_rebuilds(
             descriptor,
         )
     return descriptors, signals
+
+
+def _rebuild_preference(candidate: dict[str, Any]) -> tuple[int, int, str]:
+    """Prefer Imprint's normalized protocol semantics for equivalent signals."""
+    sources = candidate.get("recognizer_sources", [])
+    return (
+        0 if "builtin_adapter" in sources else 1,
+        0 if candidate.get("protocol") in KNOWN_PROTOCOLS else 1,
+        str(candidate.get("protocol", "")),
+    )
+
+
+def _rebuild_signals_equivalent(left: IRSignal, right: IRSignal) -> bool:
+    """Treat encoder rounding as equal without hiding material differences."""
+    return (
+        left.carrier_frequency == right.carrier_frequency
+        and len(left.timings) == len(right.timings)
+        and all(
+            abs(left_value - right_value) <= _REBUILD_EQUIVALENCE_TOLERANCE_US
+            for left_value, right_value in zip(
+                left.timings,
+                right.timings,
+                strict=True,
+            )
+        )
+    )
 
 
 def _apply_decoder_frame_evidence(

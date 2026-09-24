@@ -24,6 +24,17 @@ def test_zosung_round_trip_preserves_the_envelope() -> None:
     assert restored == source
 
 
+def test_broadlink_encoding_matches_the_zg_ir01_transport_packet() -> None:
+    source = IRSignal([9_000, 4_500, 560, 560], 38_000)
+
+    assert ir_formats.broadlink_encode(source) == "JgAGAAABKJQSEg0F"
+
+
+def test_broadlink_encoding_rejects_unrepresentable_timings() -> None:
+    with pytest.raises(IRFormatError, match="does not fit"):
+        ir_formats.broadlink_encode(IRSignal([2_000_000]))
+
+
 def test_fastlz_overlap_copy_is_supported() -> None:
     two_literals = bytes((1, ord("A"), ord("B")))
     four_byte_copy_at_distance_two = bytes(((2 << 5), 1))
@@ -38,6 +49,34 @@ def test_literal_compression_round_trips_binary_input() -> None:
 def test_zosung_rejects_text_that_is_not_base64() -> None:
     with pytest.raises(IRFormatError):
         ir_formats.zosung_decode("this is not an encoded signal!")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ('{"schema":"imprint_refinery.backup","version":2}', "native_json"),
+        ("Filetype: IR signals file\nVersion: 1\n#\nname: Power", "flipper"),
+        ('<remoteSet xmlns="http://www.harctoolbox.org/Girr"></remoteSet>', "girr"),
+        ("begin remote\n  name television\nend remote", "lirc"),
+        ("0000 006D 0001 0000 0015 0016", "pronto"),
+        ("+9000 -4500 +560 -560", "raw_signed"),
+        ("9000 4500 560 560", "raw_unsigned"),
+    ],
+)
+def test_import_format_detection_uses_distinct_document_signatures(
+    value: str, expected: str
+) -> None:
+    assert ir_formats.detect_import_format(value) == expected
+
+
+def test_import_format_detection_recognizes_zosung_payloads() -> None:
+    payload = ir_formats.zosung_encode(IRSignal([9000, 4500, 560, 560]))
+    assert ir_formats.detect_import_format(payload) == "zosung_base64"
+
+
+def test_import_format_detection_rejects_unknown_text() -> None:
+    with pytest.raises(IRFormatError, match="could not detect"):
+        ir_formats.detect_import_format("not a supported IR document")
 
 
 @pytest.mark.parametrize("invalid", [[], [600, 0, 600], [-1, 700]])

@@ -15,8 +15,11 @@ from custom_components.imprint_refinery.const import (
     ERROR_ZHA_UNAVAILABLE,
 )
 from custom_components.imprint_refinery.errors import ImprintRefineryError
-from custom_components.imprint_refinery.ir_formats import IRSignal, zosung_encode
-from custom_components.imprint_refinery.transmission import SignalQueue
+from custom_components.imprint_refinery.ir_formats import (
+    IRSignal,
+    broadlink_encode,
+    zosung_encode,
+)
 from custom_components.imprint_refinery.zha_bridge import (
     ZhaBridge,
     cluster_from_proxy,
@@ -126,6 +129,15 @@ def test_driver_discovery_returns_matching_endpoint() -> None:
     assert discover_zha_driver(proxy) == ("zosung_ts1201", 1, DEFAULT_CLUSTER_ID)
 
 
+def test_driver_discovery_selects_hobeian_broadlink_variant() -> None:
+    proxy, _ = _wrapped_proxy()
+    assert discover_zha_driver(
+        proxy,
+        manufacturer="HOBEIAN",
+        model="ZG-IR01",
+    ) == ("hobeian_zg_ir01", 1, DEFAULT_CLUSTER_ID)
+
+
 def _emitter() -> dict:
     return {
         "ieee": "00:11",
@@ -142,7 +154,17 @@ class _ControlCluster:
 
     async def command(self, command_id, **params) -> None:
         device = self._harness.device
-        device.seq = (device.seq + 1) % 0x10000
+        device.seq = (
+            (device.seq + 1) % 0x10000
+            if self._harness.send_sequence is None
+            else self._harness.send_sequence
+        )
+        code = params.get("code")
+        if code is not None:
+            device.ir_msg_to_send[device.seq] = (
+                '{"key_num":1,"delay":300,"key1":'
+                f'{{"num":1,"freq":38000,"type":1,"key_code":"{code}"}}}}'
+            )
         self._harness.calls.append((command_id, params, device.seq))
         if self._harness.complete_during_send:
             self._harness.complete(device.seq)
@@ -165,11 +187,13 @@ class _ZosungHarness:
         start_sequence: int = 0,
         *,
         complete_during_send: bool = False,
+        send_sequence: int | None = None,
     ) -> None:
-        self.device = SimpleNamespace(seq=start_sequence)
+        self.device = SimpleNamespace(seq=start_sequence, ir_msg_to_send={})
         self.calls = []
         self.listeners = []
         self.complete_during_send = complete_during_send
+        self.send_sequence = send_sequence
         control = _ControlCluster(self)
         transmit = _TransmitCluster(self)
         endpoint = SimpleNamespace(
@@ -194,6 +218,14 @@ class _ZosungHarness:
         for listener in tuple(self.listeners):
             listener.cluster_command(1, command_id, SimpleNamespace(seq=sequence))
 
+    def request_chunk(self, sequence: int, position: int) -> None:
+        for listener in tuple(self.listeners):
+            listener.cluster_command(
+                1,
+                2,
+                SimpleNamespace(seq=sequence, position=position),
+            )
+
     async def wait_for_calls(self, count: int) -> None:
         async def wait() -> None:
             while len(self.calls) < count:
@@ -215,6 +247,17 @@ def test_send_converts_canonical_timings_only_at_the_driver_boundary(
     assert harness.listeners == []
 
 
+def test_hobeian_send_uses_broadlink_timing_packets(monkeypatch) -> None:
+    harness = _ZosungHarness(0xFFFF, complete_during_send=True)
+    harness.install(monkeypatch)
+    signal = IRSignal([9000, 4500, 560, 560], 38_000)
+    emitter = _emitter() | {"driver": "hobeian_zg_ir01"}
+
+    asyncio.run(ZhaBridge(object()).send(emitter, signal))
+
+    assert harness.calls == [(2, {"code": broadlink_encode(signal)}, 0)]
+
+
 def test_send_waits_for_the_matching_zosung_completion_frame(monkeypatch) -> None:
     async def scenario() -> None:
         harness = _ZosungHarness(40)
@@ -233,6 +276,49 @@ def test_send_waits_for_the_matching_zosung_completion_frame(monkeypatch) -> Non
         assert not task.done()
 
         harness.complete(41)
+        await task
+        assert harness.listeners == []
+
+    asyncio.run(scenario())
+
+
+def test_send_uses_the_sequence_chosen_by_a_fixed_sequence_device(monkeypatch) -> None:
+    async def scenario() -> None:
+        harness = _ZosungHarness(40, send_sequence=0)
+        harness.install(monkeypatch)
+        task = asyncio.create_task(
+            ZhaBridge(object()).send(
+                _emitter(), IRSignal([9000, 4500, 560, 560], 38_000)
+            )
+        )
+        await harness.wait_for_calls(1)
+        assert harness.calls[0][2] == 0
+        harness.complete(0)
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_hobeian_send_completes_after_the_device_consumes_the_message(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        harness = _ZosungHarness(40, send_sequence=0)
+        harness.install(monkeypatch)
+        emitter = _emitter() | {"driver": "hobeian_zg_ir01"}
+        task = asyncio.create_task(
+            ZhaBridge(object()).send(
+                emitter,
+                IRSignal([9000, 4500, 560, 560], 38_000),
+            )
+        )
+        await harness.wait_for_calls(1)
+        message_length = len(harness.device.ir_msg_to_send[0])
+        harness.request_chunk(0, message_length - 1)
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        harness.request_chunk(0, message_length)
         await task
         assert harness.listeners == []
 
@@ -262,19 +348,18 @@ def test_send_timeout_is_visible_and_removes_the_completion_listener(
     assert harness.listeners == []
 
 
-def test_signal_queue_holds_the_next_send_until_zosung_completion(
+def test_provider_holds_the_next_send_until_zosung_completion(
     monkeypatch,
 ) -> None:
     async def scenario() -> None:
         harness = _ZosungHarness()
         harness.install(monkeypatch)
-        status = SimpleNamespace(async_set=lambda *args, **kwargs: None)
-        queue = SignalQueue(ZhaBridge(object()), status)
+        bridge = ZhaBridge(object())
         signal = IRSignal([9000, 4500, 560, 560], 38_000)
 
-        first = asyncio.create_task(queue.submit("emitter", _emitter(), signal))
+        first = asyncio.create_task(bridge.send(_emitter(), signal))
         await harness.wait_for_calls(1)
-        second = asyncio.create_task(queue.submit("emitter", _emitter(), signal))
+        second = asyncio.create_task(bridge.send(_emitter(), signal))
         await asyncio.sleep(0)
         assert [call[2] for call in harness.calls] == [1]
 
@@ -284,8 +369,7 @@ def test_signal_queue_holds_the_next_send_until_zosung_completion(
         assert not second.done()
 
         harness.complete(2)
-        results = await asyncio.gather(first, second)
-        assert [result.confirmed for result in results] == [False, False]
+        await asyncio.gather(first, second)
 
     asyncio.run(scenario())
 

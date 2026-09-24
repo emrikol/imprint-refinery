@@ -3,7 +3,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock
 
 from probatio import Invalid as SchemaInvalid
 import pytest
@@ -11,7 +11,6 @@ import voluptuous as vol
 
 from custom_components.imprint_refinery.const import DOMAIN
 from custom_components.imprint_refinery.ir_formats import (
-    IRSignal,
     analyze_signal,
     encode_known_protocol,
 )
@@ -27,49 +26,63 @@ from custom_components.imprint_refinery.services import (
     register_services,
     websocket_execute,
 )
-from custom_components.imprint_refinery.transmission import SendResult
 
 
 def execute(awaitable):
     return asyncio.run(awaitable)
 
 
-class StatusLog:
-    def __init__(self) -> None:
-        self.events = []
-
-    def async_set(self, state, **details) -> None:
-        self.events.append((state, details))
-
-
 class StoreStub:
     def __init__(self) -> None:
-        self.emitter = {"ieee": "00:11", "config": {}}
-        self.data = {"emitters": {"0011": self.emitter}}
-        self.add_location = AsyncMock()
+        self.data = {
+            "remote_profiles": {
+                "projector_profile": {
+                    "commands": {
+                        "power": {
+                            "code": "+9000 -4500 +560 -560",
+                            "format": "raw_signed",
+                        }
+                    }
+                }
+            },
+            "appliances": {
+                "projector": {
+                    "remote_profile_id": "projector_profile",
+                    "infrared_emitter_ref": "emitter-registry-uuid",
+                }
+            },
+        }
+        self.create_remote_profile = AsyncMock()
+        self.duplicate_command = AsyncMock()
 
-    def choose_emitter(self, key=None):
-        return self.emitter
-
-    def command_at(self, location, appliance, command):
+    def command_for_appliance(self, appliance, command):
         return {"code": "+9000 -4500 +560 -560", "format": "raw_signed"}
 
     def snapshot(self):
-        return {"emitters": [], "locations": []}
+        return {"remote_profiles": {}, "appliances": {}}
+
+    def export_backup(self, **kwargs):
+        return {
+            "schema": "imprint_refinery.backup",
+            "version": 2,
+            "scope": "library",
+            "history": "full",
+            "command_count": 1,
+            "remote_profiles": {},
+            "appliances": {
+                "projector": {
+                    "name": "Projector",
+                    "remote_profile_id": "projector_profile",
+                    "preferred_platform": "remote",
+                }
+            },
+        }
 
 
 def runtime_hass():
     store = StoreStub()
-    status = StatusLog()
-    queue = SimpleNamespace(
-        submit=AsyncMock(return_value=SendResult("token", "0011", 2, 3, 0))
-    )
-    transport = SimpleNamespace()
     runtime = {
         "store": store,
-        "status": status,
-        "signal_queue": queue,
-        "transport": transport,
         "capture_tasks": {},
     }
     services = SimpleNamespace(registered={})
@@ -83,7 +96,7 @@ def runtime_hass():
         services=services,
         async_add_executor_job=lambda operation: operation(),
     )
-    return hass, store, status, queue
+    return hass, store
 
 
 def call(action: str, **data):
@@ -91,10 +104,9 @@ def call(action: str, **data):
 
 
 def test_panel_inventory_is_unique_complete_and_schema_backed() -> None:
-    assert len(PANEL_ACTIONS) == 38
     assert len(set(PANEL_ACTIONS)) == len(PANEL_ACTIONS)
     assert set(_schemas()) == set(PANEL_ACTIONS)
-    assert REGISTERED_SERVICES == (Actions.SEND_COMMAND,)
+    assert REGISTERED_SERVICES == ()
 
 
 def test_public_scalar_validators_reject_ambiguous_input() -> None:
@@ -109,22 +121,18 @@ def test_public_scalar_validators_reject_ambiguous_input() -> None:
         import_payload("x" * 2_000_001)
 
 
-def test_registration_uses_one_declarative_spec_per_service() -> None:
+def test_import_inspection_contract_accepts_backend_auto_detection() -> None:
+    validated = _schemas()[Actions.INSPECT_IMPORT](
+        {Fields.CODE: "Filetype: IR signals file\nVersion: 1", Fields.FORMAT: "auto"}
+    )
+    assert validated[Fields.FORMAT] == "auto"
+
+
+def test_registration_installs_only_the_private_panel_api() -> None:
     hass, *_ = runtime_hass()
-    with patch(
-        "custom_components.imprint_refinery.services.service_helper."
-        "async_register_platform_entity_service"
-    ) as register:
-        api = register_services(hass, lambda reference: reference)
+    api = register_services(hass)
     assert isinstance(api, ServiceAPI)
-    register.assert_called_once()
-    args, options = register.call_args
-    assert args == (hass, DOMAIN, Actions.SEND_COMMAND)
-    assert options["entity_domain"] == "remote"
-    assert options["func"] == "async_send_stored_command"
-    ((field, validator),) = options["schema"].items()
-    assert field.schema == Fields.COMMAND_ID
-    assert validator(" power ") == "power"
+    assert hass.services.registered == {}
 
 
 def test_panel_websocket_validates_and_dispatches_internal_action() -> None:
@@ -149,46 +157,80 @@ def test_panel_websocket_validates_and_dispatches_internal_action() -> None:
             {
                 "id": 7,
                 "type": "imprint_refinery/execute",
-                "action": Actions.CREATE_LOCATION,
-                "data": {Fields.LOCATION_ID: " den ", Fields.NAME: "Den"},
+                "action": Actions.CREATE_REMOTE_PROFILE,
+                "data": {
+                    Fields.REMOTE_PROFILE_ID: " television ",
+                    Fields.NAME: "Television",
+                },
             },
         )
     )
 
     handler.assert_awaited_once()
     dispatched = handler.await_args.args[0]
-    assert dispatched.data == {Fields.LOCATION_ID: "den", Fields.NAME: "Den"}
+    assert dispatched.data == {
+        Fields.REMOTE_PROFILE_ID: "television",
+        Fields.NAME: "Television",
+        Fields.APPLIANCE_TYPE: "generic",
+    }
     connection.send_result.assert_called_once_with(7, {"status": "saved"})
     connection.send_error.assert_not_called()
 
 
-def test_send_command_routes_saved_payload_with_library_coordinates() -> None:
-    hass, _store, _status, queue = runtime_hass()
-    api = ServiceAPI(hass, lambda reference: "0011")
+def test_send_command_uses_appliance_route_not_temporary_test_emitter(
+    monkeypatch,
+) -> None:
+    hass, _store = runtime_hass()
+    delivered = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.services.infrared.async_send_command",
+        delivered,
+    )
+    api = ServiceAPI(hass)
     response = execute(
         api.send_command(
             call(
                 Actions.SEND_COMMAND,
-                location_id="den",
                 appliance_id="projector",
                 command_id="power",
-                emitter_id="infrared.blaster",
+                infrared_emitter_ref="temporary-test-emitter",
             )
         )
     )
     assert response["status"] == States.SENT_UNCONFIRMED
-    submitted = queue.submit.await_args
-    assert submitted.args[:3] == (
-        "0011",
-        {"ieee": "00:11", "config": {}},
-        IRSignal([9000, 4500, 560, 560], 38_000),
+    assert delivered.await_args.args[:2] == (hass, "emitter-registry-uuid")
+    command = delivered.await_args.args[2]
+    assert command.get_raw_timings() == [9000, -4500, 560, -560]
+
+
+def test_backup_export_includes_only_portable_area_name(monkeypatch) -> None:
+    hass, _store = runtime_hass()
+    device = SimpleNamespace(id="device-1", area_id="living-room")
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.services.dr.async_get",
+        lambda current_hass: SimpleNamespace(
+            async_get_devices=lambda **kwargs: [device]
+        ),
     )
-    route = submitted.kwargs["route"]
-    assert (route.location, route.appliance, route.command) == (
-        "den",
-        "projector",
-        "power",
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.services.ar.async_get",
+        lambda current_hass: SimpleNamespace(
+            async_get_area=lambda area_id: SimpleNamespace(
+                id=area_id, name="Living room"
+            )
+        ),
     )
+
+    document = execute(
+        ServiceAPI(hass).export_backup(
+            call(Actions.EXPORT_BACKUP, include_history=True)
+        )
+    )
+
+    appliance = document["appliances"]["projector"]
+    assert appliance["area_name"] == "Living room"
+    assert "area_id" not in appliance
+    assert "infrared_emitter_ref" not in appliance
 
 
 def test_protocol_rebuild_panel_action_returns_canonical_signal_and_carrier() -> None:
@@ -198,7 +240,7 @@ def test_protocol_rebuild_panel_action_returns_canonical_signal_and_carrier() ->
         return operation()
 
     hass.async_add_executor_job = add_executor_job
-    api = ServiceAPI(hass, lambda reference: reference)
+    api = ServiceAPI(hass)
     api.analyze = AsyncMock(return_value={"protocol": "SIRC"})
     source = encode_known_protocol("SIRC", 16, 18)
     rebuild = next(
@@ -232,16 +274,47 @@ def test_protocol_rebuild_panel_action_returns_canonical_signal_and_carrier() ->
 
 
 def test_generic_mutation_plan_calls_store_and_returns_status() -> None:
-    hass, store, status, _queue = runtime_hass()
-    api = ServiceAPI(hass, lambda reference: reference)
+    hass, store = runtime_hass()
+    api = ServiceAPI(hass)
     response = execute(
-        api.handler_for(Actions.CREATE_LOCATION)(
-            call(Actions.CREATE_LOCATION, location_id="garage", name="Garage")
+        api.handler_for(Actions.CREATE_REMOTE_PROFILE)(
+            call(
+                Actions.CREATE_REMOTE_PROFILE,
+                remote_profile_id="television",
+                name="Television",
+                appliance_type="tv",
+            )
         )
     )
-    store.add_location.assert_awaited_once_with("garage", "Garage")
+    store.create_remote_profile.assert_awaited_once_with(
+        "television", "Television", appliance_type="tv"
+    )
     assert response == {"status": "saved"}
-    assert status.events[-1][0] == States.IDLE
+
+
+def test_duplicate_command_dispatches_complete_source_and_target_identity() -> None:
+    hass, store = runtime_hass()
+    response = execute(
+        ServiceAPI(hass).handler_for(Actions.DUPLICATE_COMMAND)(
+            call(
+                Actions.DUPLICATE_COMMAND,
+                remote_profile_id="projector_profile",
+                command_id="power",
+                target_remote_profile_id="bedroom_profile",
+                target_command_id="main_power",
+                name="Main power",
+            )
+        )
+    )
+
+    store.duplicate_command.assert_awaited_once_with(
+        "projector_profile",
+        "power",
+        "bedroom_profile",
+        "main_power",
+        "Main power",
+    )
+    assert response == {"status": "duplicated"}
 
 
 def test_service_strings_and_english_translation_cover_the_same_actions() -> None:
@@ -252,10 +325,28 @@ def test_service_strings_and_english_translation_cover_the_same_actions() -> Non
     )
     strings = json.loads((root / "strings.json").read_text())
     english = json.loads((root / "translations" / "en.json").read_text())
-    assert set(strings["services"]) == set(REGISTERED_SERVICES)
-    assert set(english["services"]) == set(REGISTERED_SERVICES)
+    assert set(strings.get("services", {})) == set(REGISTERED_SERVICES)
+    assert set(english.get("services", {})) == set(REGISTERED_SERVICES)
     assert sorted(path.name for path in (root / "translations").glob("*.json")) == [
         "en.json"
     ]
     icons = json.loads((root / "icons.json").read_text())
     assert set(icons["services"]) == set(REGISTERED_SERVICES)
+
+
+def test_legacy_automation_surfaces_are_absent() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    integration = root / "custom_components" / "imprint_refinery"
+    assert not (integration / "device_action.py").exists()
+    assert not (integration / "services.yaml").exists()
+    for source in [
+        integration / "services.py",
+        integration / "strings.json",
+        integration / "translations" / "en.json",
+        root / "frontend" / "core" / "home-assistant-use.ts",
+    ]:
+        value = source.read_text()
+        assert "send_saved_command" not in value
+        assert "imprint_refinery.send_command" not in value

@@ -5,17 +5,17 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import re
 from typing import Any
-from uuid import uuid4
 
-from homeassistant.components import websocket_api
-from homeassistant.const import STATE_UNAVAILABLE, Platform
+from homeassistant.components import infrared, websocket_api
+from homeassistant.components.infrared import InfraredReceivedSignal
+from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import (
+    area_registry as ar,
     config_validation as cv,
     device_registry as dr,
     entity_registry as er,
-    service as service_helper,
 )
 import voluptuous as vol
 
@@ -29,20 +29,26 @@ from .catalog import (
 )
 from .catalog_sessions import GuidedCatalogSessionManager, GuidedSessionError
 from .const import (
+    CONF_IEEE,
     DOMAIN,
+    EMITTER_SUBENTRY_TYPE,
+    ERROR_CAPTURE_TIMEOUT,
     ERROR_CATALOG_UNAVAILABLE,
     ERROR_CODE_EMPTY,
     ERROR_CODE_INVALID,
     ERROR_COMMAND_NOT_FOUND,
+    ERROR_EMITTER_NOT_CONFIGURED,
     ERROR_GUIDED_SESSION,
-    ERROR_UNEXPECTED,
-    HOME_ASSISTANT_IR,
 )
-from .consumer import emitter_key
-from .emitter_identity import emitter_entity_id
-from .entity_projection import project_command_buttons, project_library
+from .device_bridge import remove_consumer_device_entries
+from .emitter_identity import normalize_emitter_ref
+from .entity_projection import (
+    appliance_configuration_url,
+    project_command_buttons,
+    project_library,
+)
 from .errors import ImprintRefineryError
-from .hardware import InfraredHardware, discover_home_assistant_emitters
+from .hardware import async_compatibility_adapter_available, discover_infrared_hardware
 from .identifiers import unique_identifier
 from .ir_formats import (
     DEFAULT_CARRIER_HZ,
@@ -54,6 +60,7 @@ from .ir_formats import (
     analyze_signal,
     convert_signal,
     decode_signal,
+    detect_import_format,
     encode_profile_format,
     encode_raw,
     rebuild_recognized_signal,
@@ -65,10 +72,8 @@ from .ir_formats.conversion import (
     decode_profile_partial,
 )
 from .product_spec import PLATFORM_PREFERENCES, SIGNAL_ROLES, Actions, Fields, States
-from .signal_command import signal_from_command
-from .status import ActivityStatus
+from .signal_command import RawSignalCommand, signal_from_command
 from .storage import SignalLibraryStore
-from .transmission import SendRoute, SignalQueue
 
 MAX_IMPORT_CHARACTERS = 2_000_000
 _ID_PATTERN = re.compile(r"^[a-z0-9_]+$")
@@ -98,23 +103,23 @@ PANEL_ACTIONS = (
     Actions.SEND_COMMAND,
     Actions.GET_LIBRARY,
     Actions.MOVE_COMMAND,
-    Actions.MOVE_APPLIANCE,
-    Actions.CREATE_LOCATION,
+    Actions.DUPLICATE_COMMAND,
+    Actions.CREATE_REMOTE_PROFILE,
+    Actions.UPDATE_REMOTE_PROFILE,
+    Actions.DUPLICATE_REMOTE_PROFILE,
     Actions.CREATE_APPLIANCE,
     Actions.CREATE_COMMAND,
     Actions.UPDATE_COMMAND,
     Actions.UPDATE_APPLIANCE,
-    Actions.RENAME_LOCATION,
-    Actions.RENAME_APPLIANCE,
     Actions.RENAME_COMMAND,
     Actions.RESTORE_REVISION,
     Actions.LABEL_REVISION,
-    Actions.REMOVE_LOCATION,
+    Actions.REMOVE_REMOTE_PROFILE,
     Actions.REMOVE_APPLIANCE,
     Actions.REMOVE_COMMAND,
 )
 
-REGISTERED_SERVICES = (Actions.SEND_COMMAND,)
+REGISTERED_SERVICES: tuple[str, ...] = ()
 PANEL_COMMAND = f"{DOMAIN}/execute"
 
 
@@ -155,14 +160,6 @@ def _at_least_one(*fields: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
         return value
 
     return validate
-
-
-def _profile_export_schema(value: dict[str, Any]) -> dict[str, Any]:
-    if (Fields.LOCATION_ID in value) != (Fields.APPLIANCE_ID in value):
-        raise vol.Invalid(
-            "location_id and appliance_id must be provided together for an appliance export"
-        )
-    return value
 
 
 def _download_filename_stem(value: str) -> str:
@@ -217,78 +214,69 @@ class MutationPlan:
 
 
 _MUTATIONS = {
-    Actions.CREATE_LOCATION: MutationPlan(
-        "add_location", (Fields.LOCATION_ID, Fields.NAME)
-    ),
-    Actions.CREATE_APPLIANCE: MutationPlan(
-        "create_appliance",
-        (Fields.LOCATION_ID, Fields.APPLIANCE_ID, Fields.NAME, Fields.APPLIANCE_TYPE),
-        (
-            (Fields.PREFERRED_PLATFORM, "preferred_platform"),
-            (Fields.EMITTER_ID, "emitter_id"),
-        ),
+    Actions.CREATE_REMOTE_PROFILE: MutationPlan(
+        "create_remote_profile",
+        (Fields.REMOTE_PROFILE_ID, Fields.NAME),
+        ((Fields.APPLIANCE_TYPE, "appliance_type"),),
         include_missing=True,
     ),
-    Actions.UPDATE_APPLIANCE: MutationPlan(
-        "revise_appliance",
-        (Fields.LOCATION_ID, Fields.APPLIANCE_ID),
+    Actions.UPDATE_REMOTE_PROFILE: MutationPlan(
+        "update_remote_profile",
+        (Fields.REMOTE_PROFILE_ID,),
         (
             (Fields.NAME, "name"),
             (Fields.APPLIANCE_TYPE, "appliance_type"),
-            (Fields.PREFERRED_PLATFORM, "preferred_platform"),
-            (Fields.EMITTER_ID, "emitter_id"),
         ),
         include_missing=True,
     ),
+    Actions.DUPLICATE_REMOTE_PROFILE: MutationPlan(
+        "duplicate_remote_profile",
+        (Fields.REMOTE_PROFILE_ID, Fields.TARGET_REMOTE_PROFILE_ID, Fields.NAME),
+    ),
     Actions.CREATE_COMMAND: MutationPlan(
         "draft_command",
-        (Fields.LOCATION_ID, Fields.APPLIANCE_ID, Fields.COMMAND_ID, Fields.NAME),
+        (Fields.REMOTE_PROFILE_ID, Fields.COMMAND_ID, Fields.NAME),
         ((Fields.ROLE, "role"),),
         include_missing=True,
     ),
     Actions.UPDATE_COMMAND: MutationPlan(
         "revise_command",
-        (Fields.LOCATION_ID, Fields.APPLIANCE_ID, Fields.COMMAND_ID),
+        (Fields.REMOTE_PROFILE_ID, Fields.COMMAND_ID),
         ((Fields.NAME, "name"), (Fields.ICON, "icon"), (Fields.ROLE, "role")),
         include_missing=True,
     ),
-    Actions.RENAME_LOCATION: MutationPlan(
-        "rename_location", (Fields.LOCATION_ID, Fields.NAME)
-    ),
-    Actions.RENAME_APPLIANCE: MutationPlan(
-        "set_appliance_name", (Fields.LOCATION_ID, Fields.APPLIANCE_ID, Fields.NAME)
-    ),
     Actions.RENAME_COMMAND: MutationPlan(
         "set_command_name",
-        (Fields.LOCATION_ID, Fields.APPLIANCE_ID, Fields.COMMAND_ID, Fields.NAME),
+        (Fields.REMOTE_PROFILE_ID, Fields.COMMAND_ID, Fields.NAME),
     ),
     Actions.MOVE_COMMAND: MutationPlan(
         "relocate_command",
         (
-            Fields.LOCATION_ID,
-            Fields.APPLIANCE_ID,
+            Fields.REMOTE_PROFILE_ID,
             Fields.COMMAND_ID,
-            Fields.TARGET_LOCATION_ID,
-            Fields.TARGET_APPLIANCE_ID,
+            Fields.TARGET_REMOTE_PROFILE_ID,
         ),
         result="moved",
     ),
-    Actions.MOVE_APPLIANCE: MutationPlan(
-        "relocate_appliance",
-        (Fields.LOCATION_ID, Fields.APPLIANCE_ID, Fields.TARGET_LOCATION_ID),
-        result="moved",
+    Actions.DUPLICATE_COMMAND: MutationPlan(
+        "duplicate_command",
+        (
+            Fields.REMOTE_PROFILE_ID,
+            Fields.COMMAND_ID,
+            Fields.TARGET_REMOTE_PROFILE_ID,
+            Fields.TARGET_COMMAND_ID,
+            Fields.NAME,
+        ),
+        result="duplicated",
     ),
-    Actions.REMOVE_LOCATION: MutationPlan(
-        "delete_location", (Fields.LOCATION_ID, Fields.CONFIRM), result="deleted"
-    ),
-    Actions.REMOVE_APPLIANCE: MutationPlan(
-        "remove_appliance",
-        (Fields.LOCATION_ID, Fields.APPLIANCE_ID, Fields.CONFIRM),
+    Actions.REMOVE_REMOTE_PROFILE: MutationPlan(
+        "remove_remote_profile",
+        (Fields.REMOTE_PROFILE_ID, Fields.CONFIRM),
         result="deleted",
     ),
     Actions.REMOVE_COMMAND: MutationPlan(
         "remove_command",
-        (Fields.LOCATION_ID, Fields.APPLIANCE_ID, Fields.COMMAND_ID),
+        (Fields.REMOTE_PROFILE_ID, Fields.COMMAND_ID),
         result="deleted",
     ),
 }
@@ -300,42 +288,15 @@ class ServiceAPI:
     def __init__(
         self,
         hass: HomeAssistant,
-        resolve_emitter_ref: Callable[[str], str],
+        resolve_emitter_ref: Callable[[str], str] | None = None,
     ) -> None:
+        del resolve_emitter_ref
         runtime = hass.data[DOMAIN]
         self.hass = hass
         self.store: SignalLibraryStore = runtime["store"]
-        self.transport: InfraredHardware = runtime["transport"]
-        self.signal_queue: SignalQueue = runtime["signal_queue"]
-        self.status: ActivityStatus = runtime["status"]
         self.capture_tasks: dict[str, asyncio.Task] = runtime["capture_tasks"]
         self.catalog_sessions: GuidedCatalogSessionManager = runtime.setdefault(
             "catalog_sessions", GuidedCatalogSessionManager()
-        )
-        self._resolve_ref = resolve_emitter_ref
-
-    def emitter(self, data: dict[str, Any]) -> dict[str, Any]:
-        return self.emitter_with_id(data)[1]
-
-    def emitter_with_id(self, data: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        reference = data.get(Fields.EMITTER_ID)
-        if reference:
-            emitter_id = self._resolve_ref(reference)
-            return emitter_id, self.store.choose_emitter(emitter_id)
-        emitter = self.store.choose_emitter(None)
-        return emitter_key(self.store, emitter), emitter
-
-    def _set_error(
-        self, action: str, data: dict[str, Any], error: ImprintRefineryError
-    ) -> None:
-        self.status.async_set(
-            States.ERROR,
-            action=action,
-            location_id=data.get(Fields.LOCATION_ID),
-            appliance_id=data.get(Fields.APPLIANCE_ID),
-            command_id=data.get(Fields.COMMAND_ID),
-            error=error.code,
-            error_message=error.message,
         )
 
     async def run(
@@ -347,34 +308,8 @@ class ServiceAPI:
         final_state: str = States.IDLE,
         start_state: str | None = None,
     ) -> Any:
-        context = {
-            "action": action,
-            "location_id": call.data.get(Fields.LOCATION_ID),
-            "appliance_id": call.data.get(Fields.APPLIANCE_ID),
-            "command_id": call.data.get(Fields.COMMAND_ID),
-        }
-        if start_state:
-            self.status.async_set(start_state, **context)
-        try:
-            result = await operation()
-        except ImprintRefineryError as error:
-            self.status.async_set(
-                States.ERROR,
-                **context,
-                error=error.code,
-                error_message=error.message,
-            )
-            raise
-        except Exception as error:
-            self.status.async_set(
-                States.ERROR,
-                **context,
-                error=ERROR_UNEXPECTED,
-                error_message=str(error),
-            )
-            raise
-        self.status.async_set(final_state, **context)
-        return result
+        del action, call, final_state, start_state
+        return await operation()
 
     async def analyze(self, signal: IRSignal, carrier_source: str) -> dict[str, Any]:
         return await self.hass.async_add_executor_job(
@@ -382,66 +317,96 @@ class ServiceAPI:
         )
 
     async def dispatch(
-        self, action: str, data: dict[str, Any], signal: IRSignal
+        self,
+        action: str,
+        data: dict[str, Any],
+        signal: IRSignal,
+        *,
+        context: Any | None = None,
     ) -> dict[str, Any]:
-        try:
-            emitter_id, emitter = self.emitter_with_id(data)
-        except ImprintRefineryError as error:
-            self._set_error(action, data, error)
-            raise
-        result = await self.signal_queue.submit(
-            emitter_id,
-            emitter,
-            signal,
-            route=SendRoute(
-                token=uuid4().hex,
-                emitter=emitter_id,
-                location=data.get(Fields.LOCATION_ID),
-                appliance=data.get(Fields.APPLIANCE_ID),
-                command=data.get(Fields.COMMAND_ID),
-                origin="service",
-            ),
+        del action
+        appliance_id = data.get(Fields.APPLIANCE_ID)
+        emitter_ref = None
+        if appliance_id:
+            emitter_ref = (
+                self.store.data["appliances"]
+                .get(appliance_id, {})
+                .get("infrared_emitter_ref")
+            )
+        else:
+            emitter_ref = data.get(Fields.INFRARED_EMITTER_REF)
+        if not emitter_ref:
+            raise ImprintRefineryError(
+                ERROR_EMITTER_NOT_CONFIGURED,
+                "No infrared emitter is assigned for this operation",
+            )
+        await infrared.async_send_command(
+            self.hass,
+            str(emitter_ref),
+            RawSignalCommand(signal),
+            context=context,
         )
-        return result.to_dict()
-
-    def _cancel_capture_window(self, emitter: dict[str, Any]) -> None:
-        task = self.capture_tasks.pop(emitter_key(self.store, emitter), None)
-        if task is not None:
-            task.cancel()
+        return {
+            "status": States.SENT_UNCONFIRMED,
+            "emitter_ref": str(emitter_ref),
+            "delivery_confirmed": False,
+        }
 
     async def cancel_capture(self, call: ServiceCall) -> dict[str, str]:
         async def operation() -> dict[str, str]:
-            emitter = self.emitter(call.data)
-            task = self.capture_tasks.pop(emitter_key(self.store, emitter), None)
+            receiver_ref = call.data[Fields.INFRARED_RECEIVER_REF]
+            task = self.capture_tasks.pop(receiver_ref, None)
             if task is not None and task is not asyncio.current_task():
                 task.cancel()
-            await self.transport.stop_capture(emitter)
+                await asyncio.gather(task, return_exceptions=True)
             return {"status": "capture_cancelled"}
 
         return await self.run(Actions.CANCEL_CAPTURE, call, operation)
 
     async def capture_signal(self, call: ServiceCall) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
-            emitter = self.emitter(call.data)
-            self._cancel_capture_window(emitter)
-            key = emitter_key(self.store, emitter)
+            receiver_ref = call.data[Fields.INFRARED_RECEIVER_REF]
+            previous = self.capture_tasks.pop(receiver_ref, None)
+            if previous is not None and previous is not asyncio.current_task():
+                previous.cancel()
+                await asyncio.gather(previous, return_exceptions=True)
             current = asyncio.current_task()
             if current is not None:
-                self.capture_tasks[key] = current
+                self.capture_tasks[receiver_ref] = current
+            loop = asyncio.get_running_loop()
+            result: asyncio.Future[InfraredReceivedSignal] = loop.create_future()
+
+            @callback
+            def received(received_signal: InfraredReceivedSignal) -> None:
+                if not result.done():
+                    result.set_result(received_signal)
+
+            remove = infrared.async_subscribe_receiver(
+                self.hass, receiver_ref, received
+            )
             try:
-                signal, carrier_source = await self.transport.capture(
-                    emitter,
-                    timeout=call.data[Fields.TIMEOUT],
-                    poll_interval=call.data[Fields.POLL_INTERVAL],
-                )
+                try:
+                    captured = await asyncio.wait_for(
+                        result, timeout=call.data[Fields.TIMEOUT]
+                    )
+                except TimeoutError as error:
+                    raise ImprintRefineryError(
+                        ERROR_CAPTURE_TIMEOUT,
+                        "No new IR signal was captured within "
+                        f"{call.data[Fields.TIMEOUT]} seconds",
+                    ) from error
+                carrier = captured.modulation or DEFAULT_CARRIER_HZ
+                signal = IRSignal([abs(value) for value in captured.timings], carrier)
+                carrier_source = "measured" if captured.modulation else "assumed"
                 return {
                     "code": encode_raw(signal, signed=True),
                     "format": "raw_signed",
                     "signal": signal_document(signal, carrier_source),
                 }
             finally:
-                if self.capture_tasks.get(key) is current:
-                    self.capture_tasks.pop(key, None)
+                remove()
+                if self.capture_tasks.get(receiver_ref) is current:
+                    self.capture_tasks.pop(receiver_ref, None)
 
         return await self.run(
             Actions.CAPTURE_SIGNAL,
@@ -453,7 +418,9 @@ class ServiceAPI:
 
     async def send_signal(self, call: ServiceCall) -> dict[str, Any]:
         signal = _decode_service_request(call.data).signal
-        return await self.dispatch(Actions.SEND_SIGNAL, call.data, signal)
+        return await self.dispatch(
+            Actions.SEND_SIGNAL, call.data, signal, context=call.context
+        )
 
     async def analyze_signal(self, call: ServiceCall) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
@@ -488,10 +455,9 @@ class ServiceAPI:
         try:
             return await self.hass.async_add_executor_job(
                 lambda: prepare_profile_import(
-                    call.data[Fields.PROFILE_ID],
+                    call.data[Fields.CATALOG_PROFILE_ID],
                     registry_data=self.store.data,
-                    location_id=call.data.get(Fields.LOCATION_ID),
-                    appliance_id=call.data.get(Fields.APPLIANCE_ID),
+                    remote_profile_id=call.data.get(Fields.REMOTE_PROFILE_ID),
                 )
             )
         except CatalogUnavailableError as error:
@@ -499,7 +465,7 @@ class ServiceAPI:
         except KeyError as error:
             raise ImprintRefineryError(
                 ERROR_CODE_INVALID,
-                f"Unknown catalog profile: {call.data[Fields.PROFILE_ID]}",
+                f"Unknown catalog profile: {call.data[Fields.CATALOG_PROFILE_ID]}",
             ) from error
 
     async def catalog_guided_start(self, call: ServiceCall) -> dict[str, Any]:
@@ -539,7 +505,9 @@ class ServiceAPI:
                 code,
                 str(candidate.get("format") or "raw_signed"),
             ).signal
-            dispatch = await self.dispatch(Actions.GUIDED_TEST, call.data, signal)
+            dispatch = await self.dispatch(
+                Actions.GUIDED_TEST, call.data, signal, context=call.context
+            )
         except Exception as error:
             self.catalog_sessions.record_send_failure(
                 session_id, candidate_id, str(error)
@@ -609,7 +577,15 @@ class ServiceAPI:
 
     async def inspect_import(self, call: ServiceCall) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
-            input_format = call.data[Fields.FORMAT]
+            requested_format = call.data[Fields.FORMAT]
+            try:
+                input_format = (
+                    detect_import_format(call.data[Fields.CODE])
+                    if requested_format == "auto"
+                    else requested_format
+                )
+            except IRFormatError as error:
+                raise ImprintRefineryError(ERROR_CODE_INVALID, str(error)) from error
             if input_format == "native_json":
                 try:
                     backup = inspect_backup(call.data[Fields.CODE])
@@ -639,8 +615,7 @@ class ServiceAPI:
                             "icon": command.get("icon", ""),
                             "native_command": command,
                             "backup_origin": {
-                                "location_id": item["location_id"],
-                                "appliance_id": item["appliance_id"],
+                                "remote_profile_id": item["remote_profile_id"],
                                 "history": backup["history"],
                             },
                         }
@@ -650,6 +625,8 @@ class ServiceAPI:
                     "command_count": len(commands),
                     "scope": backup["scope"],
                     "history": backup["history"],
+                    "remote_profiles": backup["remote_profiles"],
+                    "appliances": backup["appliances"],
                     "commands": commands,
                 }
 
@@ -711,75 +688,76 @@ class ServiceAPI:
 
     async def export_backup(self, call: ServiceCall) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
-            return self.store.export_backup(
-                location_id=call.data.get(Fields.LOCATION_ID),
-                appliance_id=call.data.get(Fields.APPLIANCE_ID),
+            document = self.store.export_backup(
+                remote_profile_id=call.data.get(Fields.REMOTE_PROFILE_ID),
                 include_history=call.data[Fields.INCLUDE_HISTORY],
             )
+            if document.get("scope") != "library":
+                return document
+            devices = dr.async_get(self.hass)
+            areas = ar.async_get(self.hass)
+            for appliance_id, appliance in document.get("appliances", {}).items():
+                device = next(
+                    iter(
+                        devices.async_get_devices(identifiers={(DOMAIN, appliance_id)})
+                    ),
+                    None,
+                )
+                area = (
+                    areas.async_get_area(device.area_id)
+                    if device is not None and device.area_id
+                    else None
+                )
+                if area is not None:
+                    appliance["area_name"] = area.name
+            return document
 
         return await self.run(Actions.EXPORT_BACKUP, call, operation)
 
     async def export_profile(self, call: ServiceCall) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
-            location_id = call.data.get(Fields.LOCATION_ID)
-            device_id = call.data.get(Fields.APPLIANCE_ID)
+            remote_profile_id = call.data.get(Fields.REMOTE_PROFILE_ID)
             output_format = call.data[Fields.OUTPUT_FORMAT]
-            locations = self.store.data.get("locations", {})
-            scope = "appliance" if device_id else "library"
-            if device_id:
+            profiles = self.store.data.get("remote_profiles", {})
+            scope = "remote_profile" if remote_profile_id else "library"
+            if remote_profile_id:
                 try:
-                    device = locations[location_id]["appliances"][device_id]
-                    selected = {
-                        location_id: {
-                            **locations[location_id],
-                            "appliances": {device_id: device},
-                        }
-                    }
+                    selected = {remote_profile_id: profiles[remote_profile_id]}
                 except KeyError as error:
                     raise ImprintRefineryError(
                         ERROR_COMMAND_NOT_FOUND,
-                        f"IR appliance {location_id}/{device_id} was not found",
+                        f"Remote profile {remote_profile_id} was not found",
                     ) from error
-                profile_name = str(device.get("name", device_id))
+                profile_name = str(
+                    selected[remote_profile_id].get("name", remote_profile_id)
+                )
                 filename_stem = _download_filename_stem(profile_name)
             else:
-                selected = locations
+                selected = profiles
                 profile_name = "Imprint Refinery Library"
                 filename_stem = "imprint-refinery-library"
 
             commands: list[tuple[str, IRSignal]] = []
             used_names: set[str] = set()
-            for current_location_id, location in sorted(selected.items()):
-                for current_device_id, device in sorted(
-                    location.get("appliances", {}).items()
-                ):
-                    for command_id, command in sorted(
-                        device.get("commands", {}).items()
-                    ):
-                        display = str(command.get("name") or command_id)
-                        if scope == "library":
-                            display = " / ".join(
-                                (
-                                    str(location.get("name") or current_location_id),
-                                    str(device.get("name") or current_device_id),
-                                    display,
-                                )
+            for current_profile_id, profile in sorted(selected.items()):
+                for command_id, command in sorted(profile.get("commands", {}).items()):
+                    display = str(command.get("name") or command_id)
+                    if scope == "library":
+                        display = " / ".join(
+                            (
+                                str(profile.get("name") or current_profile_id),
+                                display,
                             )
-                        name = _unique_profile_name(display, command_id, used_names)
-                        try:
-                            signal = signal_from_command(command)
-                        except (
-                            IRFormatError,
-                            KeyError,
-                            TypeError,
-                            ValueError,
-                        ) as error:
-                            raise ImprintRefineryError(
-                                ERROR_CODE_INVALID,
-                                "Cannot export "
-                                f"{current_location_id}/{current_device_id}/{command_id}: {error}",
-                            ) from error
-                        commands.append((name, signal))
+                        )
+                    name = _unique_profile_name(display, command_id, used_names)
+                    try:
+                        signal = signal_from_command(command)
+                    except (IRFormatError, KeyError, TypeError, ValueError) as error:
+                        raise ImprintRefineryError(
+                            ERROR_CODE_INVALID,
+                            f"Cannot export {current_profile_id}/{command_id}: {error}",
+                        ) from error
+                    commands.append((name, signal))
             if not commands:
                 raise ImprintRefineryError(
                     ERROR_CODE_EMPTY, "The selected profile has no IR commands"
@@ -821,8 +799,7 @@ class ServiceAPI:
     async def import_command_backup(self, call: ServiceCall) -> dict[str, str]:
         async def operation() -> dict[str, str]:
             await self.store.import_command_backup(
-                call.data[Fields.LOCATION_ID],
-                call.data[Fields.APPLIANCE_ID],
+                call.data[Fields.REMOTE_PROFILE_ID],
                 call.data[Fields.COMMAND_ID],
                 call.data[Fields.PAYLOAD],
             )
@@ -888,8 +865,7 @@ class ServiceAPI:
             )
             signal = decoded.signal
             await self.store.store_signal(
-                call.data[Fields.LOCATION_ID],
-                call.data[Fields.APPLIANCE_ID],
+                call.data[Fields.REMOTE_PROFILE_ID],
                 call.data[Fields.COMMAND_ID],
                 call.data[Fields.NAME],
                 encode_raw(signal, signed=True),
@@ -904,97 +880,122 @@ class ServiceAPI:
         return await self.run(Actions.STORE_COMMAND, call, operation)
 
     async def send_command(self, call: ServiceCall) -> dict[str, Any]:
-        try:
-            command = self.store.command_at(
-                call.data[Fields.LOCATION_ID],
-                call.data[Fields.APPLIANCE_ID],
-                call.data[Fields.COMMAND_ID],
-            )
-        except ImprintRefineryError as error:
-            self._set_error(Actions.SEND_COMMAND, call.data, error)
-            raise
+        command = self.store.command_for_appliance(
+            call.data[Fields.APPLIANCE_ID],
+            call.data[Fields.COMMAND_ID],
+        )
         try:
             signal = signal_from_command(command)
         except IRFormatError as error:
-            self._set_error(
-                Actions.SEND_COMMAND,
-                call.data,
-                ImprintRefineryError(ERROR_CODE_INVALID, str(error)),
-            )
             raise ImprintRefineryError(ERROR_CODE_INVALID, str(error)) from error
-        return await self.dispatch(Actions.SEND_COMMAND, call.data, signal)
+        return await self.dispatch(
+            Actions.SEND_COMMAND, call.data, signal, context=call.context
+        )
 
     async def get_library(self, call: ServiceCall) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
-            await self.store.async_sync_home_assistant_emitters(
-                discover_home_assistant_emitters(self.hass)
-            )
+            await self.store.async_refresh_analysis()
             response = self.store.snapshot()
+            response["infrared_hardware"] = discover_infrared_hardware(self.hass)
+            entry_id = self.hass.data.get(DOMAIN, {}).get("config_entry_id")
+            entry = (
+                self.hass.config_entries.async_get_entry(entry_id)
+                if entry_id is not None
+                else None
+            )
+            configured_emitter_ids = (
+                {
+                    normalize_emitter_ref(
+                        str(subentry.unique_id or subentry.data.get(CONF_IEEE, ""))
+                    )
+                    for subentry in entry.get_subentries_of_type(EMITTER_SUBENTRY_TYPE)
+                }
+                if entry is not None
+                else set()
+            )
+            core_infrared_device_ids = {
+                str(item["device_id"])
+                for kind in ("emitters", "receivers")
+                for item in response["infrared_hardware"][kind]
+                if item.get("device_id")
+            }
+            response["infrared_hardware"][
+                "compatibility_adapter_available"
+            ] = await async_compatibility_adapter_available(
+                self.hass,
+                configured_emitter_ids=configured_emitter_ids,
+                core_infrared_device_ids=core_infrared_device_ids,
+            )
             registry = er.async_get(self.hass)
-            for emitter in response.get("emitters", []):
-                if emitter.get("transport") == HOME_ASSISTANT_IR:
-                    stored_ref = self.store.data["emitters"][emitter["key"]].get(
-                        "entity_id"
-                    )
-                    try:
-                        entity_id = er.async_validate_entity_id(registry, stored_ref)
-                    except vol.Invalid:
-                        entity_id = None
-                else:
-                    entity_id = registry.async_get_entity_id(
-                        Platform.INFRARED, DOMAIN, emitter["key"]
-                    )
-                emitter["entity_id"] = entity_id or emitter_entity_id(emitter["key"])
-                state = self.hass.states.get(entity_id) if entity_id else None
-                emitter["available"] = bool(
-                    state is not None and state.state != STATE_UNAVAILABLE
+            devices = dr.async_get(self.hass)
+            areas = ar.async_get(self.hass)
+            response["areas"] = [
+                {"area_id": area.id, "name": area.name}
+                for area in sorted(
+                    areas.async_list_areas(), key=lambda item: item.name.casefold()
                 )
-            locations = response.get("locations", {})
-            if isinstance(locations, dict):
-                devices = dr.async_get(self.hass)
-                for blueprint in project_library(self.store.data):
-                    appliance = (
-                        locations.get(blueprint.location, {})
-                        .get("appliances", {})
-                        .get(blueprint.appliance)
-                    )
-                    if not isinstance(appliance, dict):
-                        continue
-                    entity_id = registry.async_get_entity_id(
+            ]
+            live_emitters = {
+                item["ref"]: item for item in response["infrared_hardware"]["emitters"]
+            }
+            blueprints = {
+                item.appliance: item for item in project_library(self.store.data)
+            }
+            command_buttons: dict[str, dict[str, str]] = {}
+            for item in project_command_buttons(self.store.data):
+                command_buttons.setdefault(item.appliance, {})[
+                    item.command_id or ""
+                ] = registry.async_get_entity_id(item.platform, DOMAIN, item.entity_key)
+            for appliance_id, appliance in response["appliances"].items():
+                device = next(
+                    iter(
+                        devices.async_get_devices(identifiers={(DOMAIN, appliance_id)})
+                    ),
+                    None,
+                )
+                blueprint = blueprints.get(appliance_id)
+                emitter = live_emitters.get(appliance.get("infrared_emitter_ref"))
+                appliance["route_status"] = (
+                    "unassigned"
+                    if not appliance.get("infrared_emitter_ref")
+                    else "missing"
+                    if emitter is None
+                    else "ready"
+                    if emitter["available"]
+                    else "unavailable"
+                )
+                area = (
+                    areas.async_get_area(device.area_id)
+                    if device is not None and device.area_id
+                    else None
+                )
+                appliance["area"] = (
+                    {"area_id": area.id, "name": area.name} if area else None
+                )
+                entity_id = (
+                    registry.async_get_entity_id(
                         blueprint.platform, DOMAIN, blueprint.entity_key
                     )
-                    device = next(
-                        iter(
-                            devices.async_get_devices(
-                                identifiers={(DOMAIN, blueprint.registry_device_key)}
-                            )
-                        ),
-                        None,
-                    )
-                    appliance["home_assistant"] = {
-                        "entity_id": entity_id,
-                        "platform": blueprint.platform,
-                        "device_id": getattr(device, "id", None),
-                        "device_url": (
-                            f"/config/devices/device/{device.id}" if device else None
-                        ),
-                        "configuration_url": blueprint.configuration_url,
-                    }
-                for blueprint in project_command_buttons(self.store.data):
-                    command = (
-                        locations.get(blueprint.location, {})
-                        .get("appliances", {})
-                        .get(blueprint.appliance, {})
-                        .get("commands", {})
-                        .get(blueprint.command_id or "")
-                    )
-                    if isinstance(command, dict):
-                        command["home_assistant"] = {
-                            "entity_id": registry.async_get_entity_id(
-                                blueprint.platform, DOMAIN, blueprint.entity_key
-                            ),
-                            "platform": blueprint.platform,
-                        }
+                    if blueprint
+                    else None
+                )
+                entity_state = self.hass.states.get(entity_id) if entity_id else None
+                appliance["home_assistant"] = {
+                    "entity_id": entity_id,
+                    "available": bool(
+                        entity_state is not None
+                        and entity_state.state != STATE_UNAVAILABLE
+                    ),
+                    "platform": blueprint.platform if blueprint else None,
+                    "device_id": getattr(device, "id", None),
+                    "device_url": (
+                        f"/config/devices/device/{device.id}" if device else None
+                    ),
+                    "configuration_url": (
+                        blueprint.configuration_url if blueprint else None
+                    ),
+                    "command_entities": command_buttons.get(appliance_id, {}),
+                }
             return response
 
         return await self.run(Actions.GET_LIBRARY, call, operation)
@@ -1002,8 +1003,7 @@ class ServiceAPI:
     async def command_history(self, call: ServiceCall) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
             return self.store.history_for(
-                call.data[Fields.LOCATION_ID],
-                call.data[Fields.APPLIANCE_ID],
+                call.data[Fields.REMOTE_PROFILE_ID],
                 call.data[Fields.COMMAND_ID],
             )
 
@@ -1012,8 +1012,7 @@ class ServiceAPI:
     async def restore_revision(self, call: ServiceCall) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
             revision = await self.store.restore_revision(
-                call.data[Fields.LOCATION_ID],
-                call.data[Fields.APPLIANCE_ID],
+                call.data[Fields.REMOTE_PROFILE_ID],
                 call.data[Fields.COMMAND_ID],
                 call.data[Fields.REVISION_ID],
             )
@@ -1024,8 +1023,7 @@ class ServiceAPI:
     async def label_revision(self, call: ServiceCall) -> dict[str, str]:
         async def operation() -> dict[str, str]:
             await self.store.label_revision(
-                call.data[Fields.LOCATION_ID],
-                call.data[Fields.APPLIANCE_ID],
+                call.data[Fields.REMOTE_PROFILE_ID],
                 call.data[Fields.COMMAND_ID],
                 call.data[Fields.REVISION_ID],
                 call.data[Fields.LABEL],
@@ -1033,6 +1031,81 @@ class ServiceAPI:
             return {"status": "saved"}
 
         return await self.run(Actions.LABEL_REVISION, call, operation)
+
+    async def create_appliance(self, call: ServiceCall) -> dict[str, str]:
+        """Create one logical appliance and its Home Assistant device."""
+        await self.store.create_appliance(
+            call.data[Fields.APPLIANCE_ID],
+            call.data[Fields.NAME],
+            remote_profile_id=call.data.get(Fields.REMOTE_PROFILE_ID),
+            infrared_emitter_ref=call.data.get(Fields.INFRARED_EMITTER_REF),
+            preferred_platform=call.data.get(Fields.PREFERRED_PLATFORM, "auto"),
+        )
+        self._sync_appliance_device(
+            call.data[Fields.APPLIANCE_ID],
+            area_id=call.data.get(Fields.AREA_ID),
+        )
+        return {"status": "saved"}
+
+    async def update_appliance(self, call: ServiceCall) -> dict[str, str]:
+        """Update routing/library assignment and authoritative HA Area."""
+        await self.store.update_appliance(
+            call.data[Fields.APPLIANCE_ID],
+            name=call.data.get(Fields.NAME),
+            remote_profile_id=call.data.get(Fields.REMOTE_PROFILE_ID),
+            infrared_emitter_ref=call.data.get(Fields.INFRARED_EMITTER_REF),
+            preferred_platform=call.data.get(Fields.PREFERRED_PLATFORM),
+        )
+        self._sync_appliance_device(
+            call.data[Fields.APPLIANCE_ID],
+            area_id=call.data.get(Fields.AREA_ID),
+        )
+        return {"status": "saved"}
+
+    async def remove_appliance(self, call: ServiceCall) -> dict[str, str]:
+        """Remove one appliance without touching its shared remote profile."""
+        appliance_id = call.data[Fields.APPLIANCE_ID]
+        await self.store.remove_appliance(appliance_id, call.data[Fields.CONFIRM])
+        remove_consumer_device_entries(self.hass, appliance_id)
+        return {"status": "deleted"}
+
+    def _sync_appliance_device(self, appliance_id: str, *, area_id: str | None) -> None:
+        appliance = self.store.data["appliances"][appliance_id]
+        entry_id = self.hass.data[DOMAIN].get("config_entry_id")
+        if not entry_id:
+            entries = self.hass.config_entries.async_entries(DOMAIN)
+            if not entries:
+                return
+            entry_id = entries[0].entry_id
+        via_device_id = None
+        emitter_ref = appliance.get("infrared_emitter_ref")
+        if emitter_ref:
+            registry = er.async_get(self.hass)
+            try:
+                emitter_entity_id = er.async_validate_entity_id(registry, emitter_ref)
+            except vol.Invalid:
+                emitter_entity_id = None
+            emitter_entry = (
+                registry.async_get(emitter_entity_id) if emitter_entity_id else None
+            )
+            via_device_id = getattr(emitter_entry, "device_id", None)
+        devices = dr.async_get(self.hass)
+        device = devices.async_get_or_create(
+            config_entry_id=entry_id,
+            identifiers={(DOMAIN, appliance_id)},
+            name=appliance["name"],
+            via_device_id=via_device_id,
+            configuration_url=appliance_configuration_url(appliance_id),
+        )
+        changes: dict[str, Any] = {}
+        if device.name != appliance["name"]:
+            changes["name"] = appliance["name"]
+        if device.via_device_id != via_device_id:
+            changes["via_device_id"] = via_device_id
+        if area_id is not None and device.area_id != (area_id or None):
+            changes["area_id"] = area_id or None
+        if changes:
+            devices.async_update_device(device.id, **changes)
 
     def handler_for(self, service: str) -> Callable[[ServiceCall], Awaitable[Any]]:
         """Return a dedicated handler or a handler built from a mutation plan."""
@@ -1052,8 +1125,6 @@ class ServiceAPI:
             for source, target in plan.optional
             if plan.include_missing or source in call.data
         }
-        if reference := keywords.get("emitter_id"):
-            keywords["emitter_id"] = self._resolve_ref(reference)
 
         async def operation() -> dict[str, str]:
             await getattr(self.store, plan.method)(*arguments, **keywords)
@@ -1064,17 +1135,16 @@ class ServiceAPI:
 
 def _schemas() -> dict[str, Any]:
     """Build the authenticated panel action schemas from shared fragments."""
-    optional_emitter = {vol.Optional(Fields.EMITTER_ID): non_empty_string}
     positive = vol.All(int, vol.Range(min=1))
-    location_key = {vol.Required(Fields.LOCATION_ID): id_schema}
-    appliance_key = location_key | {vol.Required(Fields.APPLIANCE_ID): id_schema}
-    command_key = appliance_key | {vol.Required(Fields.COMMAND_ID): id_schema}
-    location = location_key | {vol.Required(Fields.NAME): non_empty_string}
-    device = appliance_key | {
+    profile_key = {vol.Required(Fields.REMOTE_PROFILE_ID): id_schema}
+    appliance_key = {vol.Required(Fields.APPLIANCE_ID): id_schema}
+    command_key = profile_key | {vol.Required(Fields.COMMAND_ID): id_schema}
+    appliance = appliance_key | {
         vol.Required(Fields.NAME): non_empty_string,
-        vol.Optional(Fields.APPLIANCE_TYPE, default="generic"): non_empty_string,
+        vol.Optional(Fields.REMOTE_PROFILE_ID): optional_string,
+        vol.Optional(Fields.INFRARED_EMITTER_REF): optional_string,
+        vol.Optional(Fields.AREA_ID): optional_string,
         vol.Optional(Fields.PREFERRED_PLATFORM): vol.In(PLATFORM_PREFERENCES),
-        vol.Optional(Fields.EMITTER_ID): optional_string,
     }
     command = command_key | {vol.Required(Fields.NAME): non_empty_string}
     signal_input = {
@@ -1083,15 +1153,18 @@ def _schemas() -> dict[str, Any]:
         vol.Optional(Fields.CARRIER_FREQUENCY): positive,
     }
     schemas: dict[str, Any] = {
-        Actions.CANCEL_CAPTURE: vol.Schema(optional_emitter),
+        Actions.CANCEL_CAPTURE: vol.Schema(
+            {vol.Required(Fields.INFRARED_RECEIVER_REF): non_empty_string}
+        ),
         Actions.CAPTURE_SIGNAL: vol.Schema(
             {
+                vol.Required(Fields.INFRARED_RECEIVER_REF): non_empty_string,
                 vol.Optional(Fields.TIMEOUT, default=60): positive,
-                vol.Optional(Fields.POLL_INTERVAL, default=1): positive,
             }
-            | optional_emitter
         ),
-        Actions.SEND_SIGNAL: vol.Schema(signal_input | optional_emitter),
+        Actions.SEND_SIGNAL: vol.Schema(
+            signal_input | {vol.Required(Fields.INFRARED_EMITTER_REF): non_empty_string}
+        ),
         Actions.ANALYZE_SIGNAL: vol.Schema(signal_input),
         Actions.CONVERT_SIGNAL: vol.Schema(
             {
@@ -1111,9 +1184,8 @@ def _schemas() -> dict[str, Any]:
         ),
         Actions.GET_CATALOG_PROFILE: vol.Schema(
             {
-                vol.Required(Fields.PROFILE_ID): non_empty_string,
-                vol.Optional(Fields.LOCATION_ID): id_schema,
-                vol.Optional(Fields.APPLIANCE_ID): id_schema,
+                vol.Required(Fields.CATALOG_PROFILE_ID): non_empty_string,
+                vol.Optional(Fields.REMOTE_PROFILE_ID): id_schema,
             }
         ),
         Actions.GUIDED_START: vol.Schema(
@@ -1126,8 +1198,8 @@ def _schemas() -> dict[str, Any]:
             {
                 vol.Required(Fields.SESSION_ID): non_empty_string,
                 vol.Required(Fields.CANDIDATE): non_empty_string,
+                vol.Required(Fields.INFRARED_EMITTER_REF): non_empty_string,
             }
-            | optional_emitter
         ),
         Actions.GUIDED_ANSWER: vol.Schema(
             {
@@ -1157,27 +1229,24 @@ def _schemas() -> dict[str, Any]:
         Actions.INSPECT_IMPORT: vol.Schema(
             {
                 vol.Required(Fields.CODE): import_payload,
-                vol.Required(Fields.FORMAT): vol.In((*INPUT_FORMATS, "native_json")),
+                vol.Required(Fields.FORMAT): vol.In(
+                    (*INPUT_FORMATS, "native_json", "auto")
+                ),
                 vol.Optional(Fields.CARRIER_FREQUENCY): positive,
                 vol.Optional(Fields.NAME, default="Imported command"): non_empty_string,
             }
         ),
         Actions.EXPORT_BACKUP: vol.Schema(
             {
-                vol.Optional(Fields.LOCATION_ID): id_schema,
-                vol.Optional(Fields.APPLIANCE_ID): id_schema,
+                vol.Optional(Fields.REMOTE_PROFILE_ID): id_schema,
                 vol.Optional(Fields.INCLUDE_HISTORY, default=True): cv.boolean,
             }
         ),
-        Actions.EXPORT_PROFILE: vol.All(
-            vol.Schema(
-                {
-                    vol.Optional(Fields.LOCATION_ID): id_schema,
-                    vol.Optional(Fields.APPLIANCE_ID): id_schema,
-                    vol.Required(Fields.OUTPUT_FORMAT): vol.In(PROFILE_OUTPUT_FORMATS),
-                }
-            ),
-            _profile_export_schema,
+        Actions.EXPORT_PROFILE: vol.Schema(
+            {
+                vol.Optional(Fields.REMOTE_PROFILE_ID): id_schema,
+                vol.Required(Fields.OUTPUT_FORMAT): vol.In(PROFILE_OUTPUT_FORMATS),
+            }
         ),
         Actions.IMPORT_BACKUP: vol.Schema({vol.Required(Fields.CODE): import_payload}),
         Actions.IMPORT_COMMAND_BACKUP: vol.Schema(
@@ -1205,8 +1274,10 @@ def _schemas() -> dict[str, Any]:
                 vol.Optional(Fields.ROLE): vol.In(("", *SIGNAL_ROLES)),
             }
         ),
-        Actions.SEND_COMMAND: vol.Schema(command_key | optional_emitter),
-        Actions.GET_LIBRARY: vol.Schema(optional_emitter),
+        Actions.SEND_COMMAND: vol.Schema(
+            appliance_key | {vol.Required(Fields.COMMAND_ID): id_schema}
+        ),
+        Actions.GET_LIBRARY: vol.Schema({}),
         Actions.COMMAND_HISTORY: vol.Schema(command_key),
         Actions.RESTORE_REVISION: vol.Schema(
             command_key
@@ -1225,8 +1296,33 @@ def _schemas() -> dict[str, Any]:
                 vol.Required(Fields.LABEL): vol.All(cv.string, vol.Length(max=80)),
             }
         ),
-        Actions.CREATE_LOCATION: vol.Schema(location),
-        Actions.CREATE_APPLIANCE: vol.Schema(device),
+        Actions.CREATE_REMOTE_PROFILE: vol.Schema(
+            profile_key
+            | {
+                vol.Required(Fields.NAME): non_empty_string,
+                vol.Optional(
+                    Fields.APPLIANCE_TYPE, default="generic"
+                ): non_empty_string,
+            }
+        ),
+        Actions.UPDATE_REMOTE_PROFILE: vol.All(
+            vol.Schema(
+                profile_key
+                | {
+                    vol.Optional(Fields.NAME): non_empty_string,
+                    vol.Optional(Fields.APPLIANCE_TYPE): non_empty_string,
+                }
+            ),
+            _at_least_one(Fields.NAME, Fields.APPLIANCE_TYPE),
+        ),
+        Actions.DUPLICATE_REMOTE_PROFILE: vol.Schema(
+            profile_key
+            | {
+                vol.Required(Fields.TARGET_REMOTE_PROFILE_ID): id_schema,
+                vol.Required(Fields.NAME): non_empty_string,
+            }
+        ),
+        Actions.CREATE_APPLIANCE: vol.Schema(appliance),
         Actions.CREATE_COMMAND: vol.Schema(command),
         Actions.UPDATE_COMMAND: vol.All(
             vol.Schema(
@@ -1244,37 +1340,36 @@ def _schemas() -> dict[str, Any]:
                 appliance_key
                 | {
                     vol.Optional(Fields.NAME): non_empty_string,
-                    vol.Optional(Fields.APPLIANCE_TYPE): non_empty_string,
+                    vol.Optional(Fields.REMOTE_PROFILE_ID): optional_string,
+                    vol.Optional(Fields.INFRARED_EMITTER_REF): optional_string,
+                    vol.Optional(Fields.AREA_ID): optional_string,
                     vol.Optional(Fields.PREFERRED_PLATFORM): vol.In(
                         PLATFORM_PREFERENCES
                     ),
-                    vol.Optional(Fields.EMITTER_ID): optional_string,
                 }
             ),
             _at_least_one(
                 Fields.NAME,
-                Fields.APPLIANCE_TYPE,
+                Fields.REMOTE_PROFILE_ID,
+                Fields.INFRARED_EMITTER_REF,
+                Fields.AREA_ID,
                 Fields.PREFERRED_PLATFORM,
-                Fields.EMITTER_ID,
             ),
-        ),
-        Actions.RENAME_LOCATION: vol.Schema(location),
-        Actions.RENAME_APPLIANCE: vol.Schema(
-            appliance_key | {vol.Required(Fields.NAME): non_empty_string}
         ),
         Actions.RENAME_COMMAND: vol.Schema(command),
         Actions.MOVE_COMMAND: vol.Schema(
+            command_key | {vol.Required(Fields.TARGET_REMOTE_PROFILE_ID): id_schema}
+        ),
+        Actions.DUPLICATE_COMMAND: vol.Schema(
             command_key
             | {
-                vol.Required(Fields.TARGET_LOCATION_ID): id_schema,
-                vol.Required(Fields.TARGET_APPLIANCE_ID): id_schema,
+                vol.Required(Fields.TARGET_REMOTE_PROFILE_ID): id_schema,
+                vol.Required(Fields.TARGET_COMMAND_ID): id_schema,
+                vol.Required(Fields.NAME): non_empty_string,
             }
         ),
-        Actions.MOVE_APPLIANCE: vol.Schema(
-            appliance_key | {vol.Required(Fields.TARGET_LOCATION_ID): id_schema}
-        ),
-        Actions.REMOVE_LOCATION: vol.Schema(
-            location_key | {vol.Required(Fields.CONFIRM): cv.boolean}
+        Actions.REMOVE_REMOTE_PROFILE: vol.Schema(
+            profile_key | {vol.Required(Fields.CONFIRM): cv.boolean}
         ),
         Actions.REMOVE_APPLIANCE: vol.Schema(
             appliance_key | {vol.Required(Fields.CONFIRM): cv.boolean}
@@ -1326,18 +1421,8 @@ def register_panel_api(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_execute)
 
 
-def register_services(
-    hass: HomeAssistant, resolve_emitter_ref: Callable[[str], str]
-) -> ServiceAPI:
-    """Register the single public entity-targeted send action."""
-    api = ServiceAPI(hass, resolve_emitter_ref)
+def register_services(hass: HomeAssistant) -> ServiceAPI:
+    """Install the private panel API without public integration actions."""
+    api = ServiceAPI(hass)
     hass.data[DOMAIN]["service_api"] = api
-    service_helper.async_register_platform_entity_service(
-        hass,
-        DOMAIN,
-        Actions.SEND_COMMAND,
-        entity_domain="remote",
-        schema={vol.Required(Fields.COMMAND_ID): id_schema},
-        func="async_send_stored_command",
-    )
     return api

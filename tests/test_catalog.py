@@ -164,18 +164,14 @@ class CatalogTests(unittest.TestCase):
         profile = catalog.get_profile("flipper_irdb:TVs/Example/Model-1")
         power = profile["commands"][0]
         registry = {
-            "locations": {
-                "living_room": {
-                    "appliances": {
-                        "tv": {
-                            "commands": {
-                                "power": {
-                                    "name": "Existing Power",
-                                    "code": power["code"],
-                                    "current_revision": 3,
-                                    "analysis": power["analysis"],
-                                }
-                            }
+            "remote_profiles": {
+                "example_tv": {
+                    "commands": {
+                        "power": {
+                            "name": "Existing Power",
+                            "code": power["code"],
+                            "current_revision": 3,
+                            "analysis": power["analysis"],
                         }
                     }
                 }
@@ -185,8 +181,7 @@ class CatalogTests(unittest.TestCase):
         preview = catalog.prepare_profile_import(
             profile["profile_id"],
             registry_data=registry,
-            location_id="living_room",
-            appliance_id="tv",
+            remote_profile_id="example_tv",
         )
 
         self.assertEqual(

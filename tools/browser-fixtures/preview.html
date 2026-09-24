@@ -25,9 +25,8 @@
       * { box-sizing: border-box; }
       html, body { margin: 0; min-height: 100%; background: var(--primary-background-color); }
       body { color: var(--primary-text-color); }
-      ha-card { display: block; min-height: 100dvh; background: var(--primary-background-color); color: var(--primary-text-color); }
+      ha-card { display: block; background: var(--primary-background-color); color: var(--primary-text-color); }
       ha-icon { display: inline-grid; width: 1em; height: 1em; place-items: center; line-height: 1; }
-      ha-icon::before { content: "◆"; font-size: .68em; }
       .fixture-shell { min-height: 100dvh; padding: 18px 24px 40px; }
       .fixture-title { height: 46px; margin: -18px -24px 20px; padding: 0 24px; display: flex; align-items: center; border-bottom: 1px solid var(--divider-color); background: #191e25; font-weight: 700; }
       @media (max-width: 720px) {
@@ -37,7 +36,465 @@
     </style>
     <script type="module">
       if (!customElements.get("ha-card")) customElements.define("ha-card", class extends HTMLElement {});
-      if (!customElements.get("ha-icon")) customElements.define("ha-icon", class extends HTMLElement {});
+      document.addEventListener("hass-notification", (event) => {
+        const detail = event.detail || {};
+        const id = String(detail.id || "fixture-notification");
+        document.querySelector(`[data-notification-id="${id}"]`)?.remove();
+        const notice = document.createElement("div");
+        notice.dataset.notificationId = id;
+        notice.setAttribute("role", detail.announceMessage ? "alert" : "status");
+        notice.textContent = String(detail.message || "");
+        notice.style.cssText = "position:fixed;inset-block-start:16px;inset-inline-start:16px;z-index:1000;max-width:min(420px,calc(100vw - 32px));padding:14px 18px;border-radius:8px;background:var(--card-background-color);box-shadow:0 8px 28px rgba(0,0,0,.35)";
+        document.body.append(notice);
+      });
+      if (!customElements.get("ha-icon")) customElements.define("ha-icon", class extends HTMLElement {
+        static observedAttributes = ["icon"];
+        connectedCallback() { this.renderIcon(); }
+        attributeChangedCallback() { this.renderIcon(); }
+        renderIcon() {
+          if (!this.isConnected) return;
+          const name = this.getAttribute("icon") || "";
+          const paths = name.includes("delete") ? '<path d="M7 8v10m5-10v10m5-10v10M5 5h14m-11 0 1-2h6l1 2m1 0-1 17H8L7 5"/>'
+            : name.includes("pencil") ? '<path d="m4 20 4-1 11-11-3-3L5 16l-1 4Zm10-13 3 3"/>'
+            : name.includes("content-copy") ? '<rect x="8" y="8" width="11" height="13" rx="1"/><path d="M16 8V4H5v13h3"/>'
+            : name.includes("download") || name.includes("import") ? '<path d="M12 3v13m-5-5 5 5 5-5M5 21h14"/>'
+            : name.includes("magnify") ? '<circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/>'
+            : name.includes("square-wave") ? '<path d="M3 15h4V7h5v10h5V9h4"/>'
+            : name.includes("backup") ? '<path d="M5 8V4l-3 3 3 3V8a8 8 0 1 1-1 8m4-4h4V8m0 4h4"/>'
+            : name.includes("send") ? '<path d="m3 4 18 8-18 8 4-8-4-8Zm4 8h14"/>'
+            : name.includes("plus") ? '<path d="M12 4v16M4 12h16"/>'
+            : name.includes("close") ? '<path d="m5 5 14 14M19 5 5 19"/>'
+            : name.includes("access-point") ? '<path d="M12 17h.01M8.5 14.5a5 5 0 0 1 7 0M5 11a10 10 0 0 1 14 0"/>'
+            : name.includes("remote") ? '<rect x="7" y="2" width="10" height="20" rx="3"/><circle cx="12" cy="7" r="2"/><path d="M10 13h4m-4 4h4"/>'
+            : name.includes("puzzle") ? '<path d="M4 9h5V4h3a2 2 0 1 1 4 0h3v5h-3a2 2 0 1 0 0 4h3v6h-6v-3a2 2 0 1 0-4 0v3H4v-6h3a2 2 0 1 0 0-4H4Z"/>'
+            : '<circle cx="12" cy="12" r="8"/><path d="M12 8v8M8 12h8"/>';
+          const root = this.shadowRoot || this.attachShadow({ mode: "open" });
+          root.innerHTML = `<style>:host{display:inline-grid;width:1em;height:1em}svg{width:100%;height:100%;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}</style><svg viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
+        }
+      });
+
+      class FixtureHaButton extends HTMLElement {
+        static get observedAttributes() { return ["aria-label", "href"]; }
+        constructor() {
+          super();
+          this.attachShadow({ mode: "open", delegatesFocus: true });
+        }
+        connectedCallback() { this.render(); }
+        attributeChangedCallback() { this.render(); }
+        get disabled() { return Boolean(this._disabled); }
+        set disabled(value) { this._disabled = Boolean(value); this.render(); }
+        get loading() { return Boolean(this._loading); }
+        set loading(value) { this._loading = Boolean(value); this.render(); }
+        get href() { return this._href || this.getAttribute("href") || ""; }
+        set href(value) { this._href = value || ""; this.render(); }
+        focus(options) { this.shadowRoot?.querySelector("button, a")?.focus(options); }
+        render() {
+          if (!this.shadowRoot) return;
+          const disabled = this.disabled || this.loading;
+          const link = this.href && !disabled;
+          const tag = link ? "a" : "button";
+          const destination = link ? ` href="${this.href.replaceAll('"', '&quot;')}"` : "";
+          const ariaLabel = this.getAttribute("aria-label") || "";
+          this.shadowRoot.innerHTML = `<style>
+            :host{display:inline-block;min-width:0;max-width:100%;--fixture-color:var(--primary-text-color)}
+            :host([variant="danger"]){--fixture-color:var(--error-color)}
+            button,a{box-sizing:border-box;width:100%;min-width:0;min-height:var(--ha-button-height,40px);border:1px solid var(--divider-color);border-radius:var(--ha-button-border-radius,999px);padding:8px 14px;display:inline-flex;align-items:center;justify-content:center;gap:7px;background:var(--card-background-color);color:var(--fixture-color);font:inherit;font-weight:600;text-decoration:none;cursor:pointer;white-space:normal}
+            :host([appearance="accent"]) button,:host([appearance="accent"]) a{border-color:var(--primary-color);background:var(--primary-color);color:var(--text-primary-color)}
+            :host([appearance="plain"]) button,:host([appearance="plain"]) a{border-color:transparent;background:transparent;justify-content:flex-start}
+            button:disabled{cursor:not-allowed;opacity:.52}
+            slot[name="start"],slot[name="end"]{display:inline-flex}
+          </style><${tag}${destination}${ariaLabel ? ` aria-label="${ariaLabel.replaceAll('"', '&quot;')}"` : ""}${disabled ? " disabled" : ""} type="button"><slot name="start"></slot><span><slot></slot></span><slot name="end"></slot></${tag}>`;
+        }
+      }
+      if (!customElements.get("ha-button")) customElements.define("ha-button", FixtureHaButton);
+
+      class FixtureHaIconButton extends HTMLElement {
+        constructor() {
+          super();
+          this.attachShadow({ mode: "open", delegatesFocus: true });
+        }
+        connectedCallback() { this.render(); }
+        get label() { return this._label || this.getAttribute("aria-label") || ""; }
+        set label(value) { this._label = value || ""; this.render(); }
+        get disabled() { return Boolean(this._disabled); }
+        set disabled(value) { this._disabled = Boolean(value); this.render(); }
+        focus(options) { this.shadowRoot?.querySelector("button")?.focus(options); }
+        render() {
+          if (!this.shadowRoot) return;
+          this.shadowRoot.innerHTML = `<style>:host{display:inline-block}button{width:var(--ha-icon-button-size,44px);height:var(--ha-icon-button-size,44px);border:1px solid var(--divider-color);border-radius:50%;display:grid;place-items:center;background:transparent;color:inherit;font:inherit;cursor:pointer}button:disabled{cursor:not-allowed;opacity:.52}::slotted(*){font-size:24px}</style><button type="button" aria-label="${this.label.replaceAll('"', '&quot;')}" title="${this.label.replaceAll('"', '&quot;')}"${this.disabled ? " disabled" : ""}><slot></slot></button>`;
+        }
+      }
+      if (!customElements.get("ha-icon-button")) customElements.define("ha-icon-button", FixtureHaIconButton);
+
+      class FixtureHaInput extends HTMLElement {
+        static get observedAttributes() { return ["type", "label", "hint", "placeholder", "maxlength", "min", "max", "step", "readonly", "autofocus"]; }
+        constructor() {
+          super();
+          this.attachShadow({ mode: "open", delegatesFocus: true });
+          this._value = "";
+        }
+        connectedCallback() { this.render(); }
+        attributeChangedCallback() { this.render(); }
+        get value() { return this._value ?? ""; }
+        set value(value) { this._value = String(value ?? ""); this.render(); }
+        get label() { return this._label || this.getAttribute("label") || ""; }
+        set label(value) { this._label = value || ""; this.render(); }
+        get hint() { return this._hint || this.getAttribute("hint") || ""; }
+        set hint(value) { this._hint = value || ""; this.render(); }
+        get disabled() { return Boolean(this._disabled); }
+        set disabled(value) { this._disabled = Boolean(value); this.render(); }
+        get readonly() { return Boolean(this._readonly || this.hasAttribute("readonly")); }
+        set readonly(value) { this._readonly = Boolean(value); this.render(); }
+        focus(options) { this.shadowRoot?.querySelector("input")?.focus(options); }
+        reportValidity() { return this.shadowRoot?.querySelector("input")?.reportValidity() ?? true; }
+        render() {
+          if (!this.shadowRoot) return;
+          const type = this.getAttribute("type") || (this.localName === "ha-input-search" ? "search" : "text");
+          const attrs = ["placeholder", "maxlength", "min", "max", "step"].map((name) => this.hasAttribute(name) ? ` ${name}="${this.getAttribute(name).replaceAll('"', '&quot;')}"` : "").join("");
+          this.shadowRoot.innerHTML = `<style>:host{display:block;min-width:0}label{display:grid;gap:6px;color:var(--secondary-text-color);font-size:13px}input{box-sizing:border-box;width:100%;min-width:0;min-height:44px;border:1px solid var(--divider-color);border-radius:9px;padding:9px 11px;background:var(--card-background-color);color:var(--primary-text-color);font:inherit}.hint{font-size:12px}</style><label>${this.label ? `<span>${this.label}</span>` : ""}<input type="${type}" aria-label="${this.label.replaceAll('"', '&quot;')}" value="${this.value.replaceAll('"', '&quot;')}"${attrs}${this.disabled ? " disabled" : ""}${this.readonly ? " readonly" : ""}>${this.hint ? `<span class="hint">${this.hint}</span>` : ""}</label>`;
+          const input = this.shadowRoot.querySelector("input");
+          input?.addEventListener("input", () => { this._value = input.value; });
+          input?.addEventListener("change", () => { this._value = input.value; });
+          if (this.hasAttribute("autofocus")) queueMicrotask(() => input?.focus());
+        }
+      }
+      if (!customElements.get("ha-input")) customElements.define("ha-input", FixtureHaInput);
+      if (!customElements.get("ha-input-search")) customElements.define("ha-input-search", class extends FixtureHaInput {});
+
+      class FixtureHaTextarea extends HTMLElement {
+        static get observedAttributes() { return ["label", "hint", "placeholder", "maxlength", "readonly", "autofocus", "rows"]; }
+        constructor() { super(); this.attachShadow({ mode: "open", delegatesFocus: true }); this._value = ""; }
+        connectedCallback() { this.render(); }
+        attributeChangedCallback() { this.render(); }
+        get value() { return this._value ?? ""; }
+        set value(value) { this._value = String(value ?? ""); this.render(); }
+        get label() { return this._label || this.getAttribute("label") || ""; }
+        set label(value) { this._label = value || ""; this.render(); }
+        get hint() { return this._hint || this.getAttribute("hint") || ""; }
+        set hint(value) { this._hint = value || ""; this.render(); }
+        get disabled() { return Boolean(this._disabled); }
+        set disabled(value) { this._disabled = Boolean(value); this.render(); }
+        get readonly() { return Boolean(this._readonly || this.hasAttribute("readonly")); }
+        set readonly(value) { this._readonly = Boolean(value); this.render(); }
+        focus(options) { this.shadowRoot?.querySelector("textarea")?.focus(options); }
+        render() {
+          if (!this.shadowRoot) return;
+          this.shadowRoot.innerHTML = `<style>:host{display:block;min-width:0}label{display:grid;gap:6px;color:var(--secondary-text-color);font-size:13px}textarea{box-sizing:border-box;width:100%;min-width:0;min-height:130px;border:1px solid var(--divider-color);border-radius:9px;padding:9px 11px;background:var(--card-background-color);color:var(--primary-text-color);font:inherit;resize:vertical}.hint{font-size:12px}</style><label>${this.label ? `<span>${this.label}</span>` : ""}<textarea aria-label="${this.label.replaceAll('"', '&quot;')}"${this.disabled ? " disabled" : ""}${this.readonly ? " readonly" : ""} placeholder="${(this.getAttribute("placeholder") || "").replaceAll('"', '&quot;')}">${this.value.replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</textarea>${this.hint ? `<span class="hint">${this.hint}</span>` : ""}</label>`;
+          const input = this.shadowRoot.querySelector("textarea");
+          input?.addEventListener("input", () => { this._value = input.value; });
+          input?.addEventListener("change", () => { this._value = input.value; });
+          if (this.hasAttribute("autofocus")) queueMicrotask(() => input?.focus());
+        }
+      }
+      if (new URLSearchParams(location.search).get("missingTextarea") !== "1" && new URLSearchParams(location.search).get("view") !== "custom-signal-fallback" && !customElements.get("ha-textarea")) customElements.define("ha-textarea", FixtureHaTextarea);
+
+      class FixtureHaSelect extends HTMLElement {
+        static get observedAttributes() { return ["label", "helper"]; }
+        constructor() { super(); this.attachShadow({ mode: "open", delegatesFocus: true }); this._options = []; this._value = ""; }
+        connectedCallback() { this.render(); }
+        attributeChangedCallback() { this.render(); }
+        get value() { return this._value ?? ""; }
+        set value(value) { this._value = value ?? ""; this.render(); }
+        get options() { return this._options; }
+        set options(value) { this._options = Array.isArray(value) ? value : []; this.render(); }
+        get label() { return this._label || this.getAttribute("label") || ""; }
+        set label(value) { this._label = value || ""; this.render(); }
+        get helper() { return this._helper || this.getAttribute("helper") || ""; }
+        set helper(value) { this._helper = value || ""; this.render(); }
+        get disabled() { return Boolean(this._disabled); }
+        set disabled(value) { this._disabled = Boolean(value); this.render(); }
+        focus(options) { this.shadowRoot?.querySelector("select")?.focus(options); }
+        render() {
+          if (!this.shadowRoot) return;
+          const options = this.options.map((option) => typeof option === "object" ? option : ({ value: option, label: option }));
+          const markup = options.map((option) => `<option value="${String(option.value).replaceAll('"', '&quot;')}"${String(option.value) === String(this.value) ? " selected" : ""}${option.disabled ? " disabled" : ""}>${String(option.label ?? option.value).replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</option>`).join("");
+          this.shadowRoot.innerHTML = `<style>:host{display:block;min-width:0}label{display:grid;gap:6px;color:var(--secondary-text-color);font-size:13px}select{box-sizing:border-box;width:100%;min-width:0;min-height:44px;border:1px solid var(--divider-color);border-radius:9px;padding:9px 11px;background:var(--card-background-color);color:var(--primary-text-color);font:inherit}.hint{font-size:12px}</style><label>${this.label ? `<span>${this.label}</span>` : ""}<select aria-label="${this.label.replaceAll('"', '&quot;')}"${this.disabled ? " disabled" : ""}>${markup}</select>${this.helper ? `<span class="hint">${this.helper}</span>` : ""}</label>`;
+          const select = this.shadowRoot.querySelector("select");
+          select?.addEventListener("change", () => {
+            this._value = select.value;
+            this.dispatchEvent(new CustomEvent("selected", { detail: { value: select.value }, bubbles: true, composed: true }));
+          });
+        }
+      }
+      if (!customElements.get("ha-select")) customElements.define("ha-select", FixtureHaSelect);
+
+      if (new URLSearchParams(location.search).get("optionalPicker") === "1" && !customElements.get("ha-icon-picker")) {
+        customElements.define("ha-icon-picker", class extends HTMLElement {
+          constructor() { super(); this.attachShadow({ mode: "open", delegatesFocus: true }); this._open = false; }
+          connectedCallback() { this.addEventListener("keydown", this.onKeydown); this.render(); }
+          disconnectedCallback() { this.removeEventListener("keydown", this.onKeydown); }
+          get open() { return this._open; }
+          set open(value) { this._open = Boolean(value); this.render(); }
+          get value() { return this._value || ""; }
+          set value(value) { this._value = String(value || ""); this.render(); }
+          get label() { return this._label || "Choose icon"; }
+          set label(value) { this._label = String(value || ""); this.render(); }
+          get helper() { return this._helper || ""; }
+          set helper(value) { this._helper = String(value || ""); this.render(); }
+          get placeholder() { return this._placeholder || ""; }
+          set placeholder(value) { this._placeholder = String(value || ""); this.render(); }
+          focus(options) { this.shadowRoot?.querySelector("button")?.focus(options); }
+          onKeydown = (event) => {
+            if (event.key !== "Escape" || !this.open) return;
+            event.preventDefault();
+            event.stopPropagation();
+            this.open = false;
+            this.focus();
+          };
+          render() {
+            if (!this.shadowRoot) return;
+            this.shadowRoot.innerHTML = `<style>:host{display:block;min-width:0;position:relative}.label{display:grid;gap:6px;color:var(--secondary-text-color);font-size:13px}button{box-sizing:border-box;width:100%;min-height:44px;border:1px solid var(--divider-color);border-radius:9px;padding:9px 11px;background:var(--card-background-color);color:var(--primary-text-color);font:inherit;text-align:start}.helper{font-size:12px}.picker{position:absolute;z-index:50;inset-inline:0;inset-block-start:calc(100% + 4px);padding:12px;border:1px solid var(--divider-color);border-radius:9px;background:var(--card-background-color);box-shadow:0 12px 30px rgba(0,0,0,.35)}</style><span class="label"><span>${this.label}</span><button type="button" aria-label="${this.label.replaceAll('"', '&quot;')}" aria-expanded="${this.open}">${this.value || this.placeholder || "Choose icon"}</button>${this.helper ? `<span class="helper">${this.helper}</span>` : ""}</span>${this.open ? '<div class="picker" role="listbox" aria-label="Icon choices">Icon choices</div>' : ""}`;
+            this.shadowRoot.querySelector("button")?.addEventListener("click", () => { this.open = !this.open; this.focus(); });
+          }
+        });
+      }
+
+      if (new URLSearchParams(location.search).get("optionalEmpty") === "1" && !customElements.get("ha-empty-state")) {
+        customElements.define("ha-empty-state", class extends HTMLElement {
+          constructor() { super(); this.attachShadow({ mode: "open" }); }
+          connectedCallback() { this.render(); }
+          get heading() { return this._heading || ""; }
+          set heading(value) { this._heading = String(value || ""); this.render(); }
+          get description() { return this._description || ""; }
+          set description(value) { this._description = String(value || ""); this.render(); }
+          render() {
+            if (!this.shadowRoot) return;
+            this.shadowRoot.innerHTML = `<style>:host{display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:100%;height:100%}.content{display:flex;flex-direction:column;align-items:center;gap:16px;box-sizing:border-box;max-width:500px;padding:32px 16px;text-align:center}h2,p{margin:0}p{color:var(--secondary-text-color)}</style><div class="content">${this.heading ? `<h2>${this.heading.replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</h2>` : ""}${this.description ? `<p>${this.description.replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</p>` : ""}<slot></slot></div>`;
+          }
+        });
+      }
+
+      class FixtureHaDropdownItem extends HTMLElement {
+        constructor() { super(); this.attachShadow({ mode: "open" }); }
+        connectedCallback() {
+          this.setAttribute("role", "menuitem");
+          this.setAttribute("tabindex", "-1");
+          this.shadowRoot.innerHTML = `<style>:host{box-sizing:border-box;min-height:40px;padding:8px 12px;display:flex;align-items:center;gap:9px;border-radius:7px;color:var(--primary-text-color);cursor:pointer}:host(:hover){background:var(--secondary-background-color)}:host([variant="danger"]){color:var(--error-color)}::slotted([slot="icon"]){flex:0 0 auto}</style><slot name="icon"></slot><slot></slot>`;
+        }
+        get value() { return this._value ?? this.getAttribute("value") ?? ""; }
+        set value(value) { this._value = value ?? ""; }
+      }
+      if (!customElements.get("ha-dropdown-item")) customElements.define("ha-dropdown-item", FixtureHaDropdownItem);
+
+      class FixtureHaDropdown extends HTMLElement {
+        constructor() { super(); this.attachShadow({ mode: "open" }); this._open = false; this.onClick = this.onClick.bind(this); }
+        connectedCallback() { this.addEventListener("click", this.onClick); this.render(); }
+        disconnectedCallback() { this.removeEventListener("click", this.onClick); }
+        onClick(event) {
+          const path = event.composedPath();
+          const item = path.find((element) => element?.localName === "ha-dropdown-item");
+          if (item) {
+            this.dispatchEvent(new CustomEvent("wa-select", { detail: { item }, bubbles: true, composed: true }));
+            this._open = false;
+            this.render();
+            return;
+          }
+          const trigger = path.find((element) => element instanceof HTMLElement && element.slot === "trigger");
+          if (trigger) {
+            this._open = !this._open;
+            this.render();
+          }
+        }
+        render() {
+          const top = (this.getAttribute("placement") || "").startsWith("top");
+          this.shadowRoot.innerHTML = `<style>:host{position:relative;display:inline-block}.menu{position:absolute;inset-inline-end:0;${top ? "bottom" : "top"}:calc(100% + 7px);z-index:200;width:max-content;min-width:210px;padding:6px;border:1px solid var(--divider-color);border-radius:11px;background:var(--card-background-color);box-shadow:0 12px 32px rgba(0,0,0,.25)}.menu[hidden]{display:none}</style><slot name="trigger"></slot><div class="menu" role="menu"${this._open ? "" : " hidden"}><slot></slot></div>`;
+        }
+      }
+      if (!customElements.get("ha-dropdown")) customElements.define("ha-dropdown", FixtureHaDropdown);
+
+      class FixtureHaCheckbox extends HTMLElement {
+        constructor() { super(); this.attachShadow({ mode: "open", delegatesFocus: true }); }
+        connectedCallback() { this.render(); }
+        get checked() { return Boolean(this._checked); }
+        set checked(value) { this._checked = Boolean(value); this.render(); }
+        get disabled() { return Boolean(this._disabled); }
+        set disabled(value) { this._disabled = Boolean(value); this.render(); }
+        render() {
+          if (!this.shadowRoot) return;
+          this.shadowRoot.innerHTML = `<style>:host{display:block}label{display:flex;gap:10px;align-items:flex-start;color:var(--primary-text-color)}input{width:20px;height:20px;flex:0 0 auto}</style><label><input type="checkbox"${this.checked ? " checked" : ""}${this.disabled ? " disabled" : ""}><span><slot></slot></span></label>`;
+          const input = this.shadowRoot.querySelector("input");
+          input?.addEventListener("change", (event) => {
+            event.stopPropagation();
+            this._checked = input.checked;
+            this.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+          });
+        }
+      }
+      if (!customElements.get("ha-checkbox")) customElements.define("ha-checkbox", FixtureHaCheckbox);
+
+      class FixtureHaAlert extends HTMLElement {
+        constructor() { super(); this.attachShadow({ mode: "open" }); }
+        connectedCallback() { this.render(); }
+        get title() { return this._title || ""; }
+        set title(value) { this._title = value || ""; this.render(); }
+        get alertType() { return this._alertType || "info"; }
+        set alertType(value) { this._alertType = value || "info"; this.render(); }
+        get dismissable() { return Boolean(this._dismissable); }
+        set dismissable(value) { this._dismissable = Boolean(value); this.render(); }
+        render() {
+          if (!this.shadowRoot) return;
+          this.shadowRoot.innerHTML = `<style>:host{display:block}.alert{box-sizing:border-box;padding:10px;border-radius:9px;background:color-mix(in srgb,var(--primary-color) 12%,transparent);display:flex;gap:9px}.content{min-width:0;flex:1}.title{font-weight:700;margin-bottom:3px}button{border:0;background:transparent;color:inherit;font-size:20px}</style><div class="alert" role="alert"><slot name="icon"></slot><div class="content">${this.title ? `<div class="title">${this.title}</div>` : ""}<slot></slot></div><slot name="action">${this.dismissable ? '<button type="button" aria-label="Dismiss">×</button>' : ""}</slot></div>`;
+          this.shadowRoot.querySelector("button")?.addEventListener("click", () => this.dispatchEvent(new CustomEvent("alert-dismissed-clicked", { bubbles: true, composed: true })));
+        }
+      }
+      if (!customElements.get("ha-alert")) customElements.define("ha-alert", FixtureHaAlert);
+
+      class FixtureHaExpansionPanel extends HTMLElement {
+        constructor() { super(); this.attachShadow({ mode: "open" }); }
+        connectedCallback() { this.render(); }
+        get header() { return this._header || this.getAttribute("header") || ""; }
+        set header(value) { this._header = value || ""; this.render(); }
+        get expanded() { return Boolean(this._expanded); }
+        set expanded(value) { this._expanded = Boolean(value); this.render(); }
+        render() {
+          if (!this.shadowRoot) return;
+          this.shadowRoot.innerHTML = `<style>:host{display:block}details{color:inherit}summary{min-height:44px;display:flex;align-items:center;cursor:pointer;font-weight:700}</style><details${this.expanded ? " open" : ""}><summary>${this.header}</summary><slot></slot></details>`;
+        }
+      }
+      if (!customElements.get("ha-expansion-panel")) customElements.define("ha-expansion-panel", FixtureHaExpansionPanel);
+      if (!customElements.get("ha-spinner")) customElements.define("ha-spinner", class extends HTMLElement {
+        connectedCallback() {
+          const root = this.shadowRoot || this.attachShadow({ mode: "open" });
+          root.innerHTML = `<style>:host{display:block;width:32px;height:32px;border:3px solid var(--divider-color);border-top-color:var(--primary-color);border-radius:50%}</style>`;
+        }
+      });
+
+      class FixtureHaDialog extends HTMLElement {
+        constructor() { super(); this._open = false; this.attachShadow({ mode: "open" }); }
+        connectedCallback() {
+          this._returnFocus = this.deepActiveElement(document);
+          this.setAttribute("role", "dialog");
+          this.setAttribute("aria-modal", "true");
+          this.addEventListener("keydown", this.onKeydown);
+          this.render();
+          this.focusInitial();
+        }
+        disconnectedCallback() {
+          this.removeEventListener("keydown", this.onKeydown);
+          this.restoreFocus();
+        }
+        get open() { return this._open !== false; }
+        set open(value) {
+          const wasOpen = this.open;
+          this._open = Boolean(value);
+          this.render();
+          if (!wasOpen && this._open) this.focusInitial();
+          if (wasOpen && !this._open) {
+            this.dispatchEvent(new CustomEvent("closed", { bubbles: true, composed: true }));
+            this.restoreFocus();
+          }
+        }
+        get headerTitle() { return this._headerTitle || this.getAttribute("header-title") || ""; }
+        set headerTitle(value) { this._headerTitle = value || ""; this.render(); }
+        get headerSubtitle() { return this._headerSubtitle || this.getAttribute("header-subtitle") || ""; }
+        set headerSubtitle(value) { this._headerSubtitle = value || ""; this.render(); }
+        set ariaLabelledBy(value) {
+          this._ariaLabelledBy = value || "";
+          if (value) this.setAttribute("aria-labelledby", value); else this.removeAttribute("aria-labelledby");
+          queueMicrotask(() => {
+            const label = value ? this.querySelector(`#${CSS.escape(value)}`)?.textContent?.trim() : "";
+            if (label) this.setAttribute("aria-label", label);
+          });
+        }
+        set ariaDescribedBy(value) { if (value) this.setAttribute("aria-describedby", value); else this.removeAttribute("aria-describedby"); }
+        get preventScrimClose() { return Boolean(this._preventScrimClose); }
+        set preventScrimClose(value) { this._preventScrimClose = Boolean(value); }
+        deepActiveElement(root) {
+          let active = root.activeElement;
+          while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+          return active;
+        }
+        focusableElements() {
+          const selectors = "ha-button:not([disabled]),ha-icon-button:not([disabled]),ha-input:not([disabled]),ha-select:not([disabled]),ha-textarea:not([disabled]),ha-checkbox:not([disabled]),button:not([disabled]),a[href],[tabindex]:not([tabindex='-1'])";
+          return [...this.querySelectorAll(selectors)].filter((element) => element.getClientRects().length > 0);
+        }
+        focusInitial() {
+          requestAnimationFrame(() => (this.querySelector("[autofocus]") || this.focusableElements()[0] || this.shadowRoot?.querySelector("button"))?.focus());
+        }
+        restoreFocus() {
+          const target = this._returnFocus;
+          this._returnFocus = null;
+          if (target?.isConnected) queueMicrotask(() => target.isConnected && target.focus());
+        }
+        onKeydown = (event) => {
+          if (event.key === "Escape") {
+            event.stopPropagation();
+            if (this.preventScrimClose) {
+              event.preventDefault();
+              return;
+            }
+            event.preventDefault();
+            this.open = false;
+            return;
+          }
+          if (event.key !== "Tab") return;
+          const focusable = this.focusableElements();
+          if (!focusable.length) return;
+          const active = this.deepActiveElement(document);
+          const index = focusable.findIndex((element) => element === active || element.matches(":focus-within"));
+          if (event.shiftKey && index <= 0) {
+            event.preventDefault();
+            focusable.at(-1)?.focus();
+          } else if (!event.shiftKey && index === focusable.length - 1) {
+            event.preventDefault();
+            focusable[0]?.focus();
+          }
+        };
+        render() {
+          if (!this.shadowRoot) return;
+          this.style.display = this.open ? "block" : "none";
+          if (this.headerTitle) this.setAttribute("aria-label", this.headerTitle);
+          this.shadowRoot.innerHTML = `<style>:host{position:fixed;inset:0;z-index:30;background:rgba(0,0,0,.58);overflow:auto;padding:18px;box-sizing:border-box}.backdrop{min-height:100%;display:grid;place-items:center}.surface{box-sizing:border-box;width:min(var(--ha-dialog-width-lg,var(--ha-dialog-width-md,620px)),calc(100vw - 36px));max-height:calc(100dvh - 36px);overflow:hidden;border:1px solid var(--divider-color);border-radius:14px;background:var(--card-background-color);color:var(--primary-text-color);box-shadow:0 24px 70px rgba(0,0,0,.36);display:flex;flex-direction:column}.header{display:flex;gap:12px;align-items:flex-start;padding:20px 20px 12px}.title{flex:1;min-width:0}.title strong{display:block;font-size:20px;line-height:1.25}.title small{display:block;margin-top:4px;color:var(--secondary-text-color);font-size:14px}.close{flex:0 0 44px;min-width:44px;min-height:44px;border:0;background:transparent;color:inherit;border-radius:10px;font:24px/1 inherit;cursor:pointer}.body{min-width:0;overflow:auto;padding:0 20px 20px}.footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px 16px}.footer.empty{display:none}@media(max-width:520px){:host{padding:0}.surface{width:100%;min-height:100dvh;max-height:100dvh;border:0;border-radius:0}.header{padding:16px 16px 12px}.body{padding:0 16px 16px}}</style><div class="backdrop"><section class="surface"><div class="header"><div class="title"><strong>${this.headerTitle}</strong>${this.headerSubtitle ? `<small>${this.headerSubtitle}</small>` : ""}</div><button class="close" type="button" aria-label="Close">×</button></div><div class="body"><slot></slot></div><div class="footer"><slot name="footer"></slot></div></section></div>`;
+          this.shadowRoot.querySelector(".close")?.addEventListener("click", () => {
+            if (!this.preventScrimClose) this.open = false;
+          });
+          const footer = this.shadowRoot.querySelector(".footer");
+          const footerSlot = footer?.querySelector("slot");
+          const updateFooter = () => footer?.classList.toggle("empty", !(footerSlot?.assignedNodes({ flatten: true }).some((node) => node.nodeType !== Node.TEXT_NODE || node.textContent?.trim())));
+          footerSlot?.addEventListener("slotchange", updateFooter, { once: true });
+          queueMicrotask(updateFooter);
+          queueMicrotask(() => {
+            const label = this._ariaLabelledBy ? this.querySelector(`#${CSS.escape(this._ariaLabelledBy)}`)?.textContent?.trim() : "";
+            if (label) this.setAttribute("aria-label", label);
+          });
+        }
+      }
+      if (!customElements.get("ha-dialog")) customElements.define("ha-dialog", FixtureHaDialog);
+
+      class FixtureHaTabGroupTab extends HTMLElement {
+        constructor() { super(); this.attachShadow({ mode: "open", delegatesFocus: true }); }
+        connectedCallback() { this.render(); }
+        get active() { return Boolean(this._active); }
+        set active(value) { this._active = Boolean(value); this.render(); }
+        focus(options) { this.shadowRoot?.querySelector("button")?.focus(options); }
+        activate() {
+          this.shadowRoot?.querySelector("button")?.click();
+          requestAnimationFrame(() => this.focus());
+        }
+        render() {
+          if (!this.shadowRoot) return;
+          this.shadowRoot.innerHTML = `<style>:host{display:inline-block}button{min-height:44px;border:0;border-bottom:2px solid ${this.active ? "var(--primary-color)" : "transparent"};padding:8px 14px;background:transparent;color:${this.active ? "var(--primary-color)" : "inherit"};font:inherit;font-weight:inherit;white-space:nowrap}</style><button type="button" role="tab" aria-selected="${this.active}"><slot></slot></button>`;
+        }
+      }
+      if (!customElements.get("ha-tab-group-tab")) customElements.define("ha-tab-group-tab", FixtureHaTabGroupTab);
+      class FixtureHaTabGroup extends HTMLElement {
+        constructor() { super(); this.attachShadow({ mode: "open" }); }
+        connectedCallback() {
+          this.shadowRoot.innerHTML = `<style>:host{display:block;max-width:100%;overflow-x:auto}.tabs{display:flex;min-width:max-content;border-bottom:1px solid var(--divider-color)}</style><div class="tabs" role="tablist"><slot></slot></div>`;
+          this.addEventListener("keydown", this.onKeydown);
+        }
+        disconnectedCallback() { this.removeEventListener("keydown", this.onKeydown); }
+        onKeydown = (event) => {
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+          const tabs = [...this.querySelectorAll("ha-tab-group-tab")];
+          const current = event.composedPath().find((item) => item?.localName === "ha-tab-group-tab");
+          const index = Math.max(0, tabs.indexOf(current));
+          const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : event.key === "ArrowLeft" ? (index - 1 + tabs.length) % tabs.length : (index + 1) % tabs.length;
+          event.preventDefault();
+          tabs[next]?.activate();
+        };
+      }
+      if (!customElements.get("ha-tab-group")) customElements.define("ha-tab-group", FixtureHaTabGroup);
     </script>
     <script type="module" src="/custom_components/imprint_refinery/www/imprint-refinery-card.js"></script>
   </head>

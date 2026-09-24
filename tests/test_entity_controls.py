@@ -30,13 +30,9 @@ def execute(awaitable):
 
 class LibraryStub:
     def __init__(self) -> None:
-        self.emitter = {"ieee": "00:11"}
-        self.data = {"emitters": {"0011": self.emitter}}
+        self.data = {}
 
-    def choose_emitter(self, requested=None):
-        return self.emitter
-
-    def command_at(self, location, appliance, command):
+    def command_at(self, remote_profile, command):
         return {"code": f"encoded:{command}", "format": "zosung_base64"}
 
 
@@ -52,18 +48,21 @@ def blueprint(
     }
     [result] = project_library(
         {
-            "locations": {
-                "loft": {
-                    "appliances": {
-                        "receiver": {
-                            "name": "Receiver",
-                            "appliance_type": appliance_type,
-                            "preferred_platform": preferred_platform,
-                            "commands": commands,
-                        }
-                    }
+            "remote_profiles": {
+                "receiver_profile": {
+                    "name": "Receiver profile",
+                    "appliance_type": appliance_type,
+                    "commands": commands,
                 }
-            }
+            },
+            "appliances": {
+                "loft__receiver": {
+                    "name": "Receiver",
+                    "remote_profile_id": "receiver_profile",
+                    "infrared_emitter_ref": "emitter-registry-uuid",
+                    "preferred_platform": preferred_platform,
+                }
+            },
         }
     )
     return result
@@ -339,22 +338,26 @@ def test_remote_command_updates_optimistic_power_after_each_successful_send() ->
 def test_command_button_preserves_name_icon_device_link_and_sends_once() -> None:
     [plan] = project_command_buttons(
         {
-            "locations": {
-                "loft": {
-                    "name": "Loft",
-                    "appliances": {
-                        "lamp": {
-                            "name": "Lamp",
-                            "commands": {
-                                "warm": {
-                                    "name": "Warm white",
-                                    "icon": "mdi:lightbulb-warm",
-                                }
-                            },
+            "remote_profiles": {
+                "lamp_profile": {
+                    "name": "Lamp profile",
+                    "appliance_type": "generic",
+                    "commands": {
+                        "warm": {
+                            "name": "Warm white",
+                            "icon": "mdi:lightbulb-warm",
                         }
                     },
                 }
-            }
+            },
+            "appliances": {
+                "loft__lamp": {
+                    "name": "Lamp",
+                    "remote_profile_id": "lamp_profile",
+                    "infrared_emitter_ref": "emitter-registry-uuid",
+                    "preferred_platform": "remote",
+                }
+            },
         }
     )
     button = SignalCommandButton(LibraryStub(), plan)
@@ -365,9 +368,9 @@ def test_command_button_preserves_name_icon_device_link_and_sends_once() -> None
     button.async_send_stored_command.assert_awaited_once_with("warm")
     assert button.name == "Warm white"
     assert button.icon == "mdi:lightbulb-warm"
-    assert button.device_info["suggested_area"] == "Loft"
-    assert button.device_info["configuration_url"].startswith(
-        "homeassistant://navigate/imprint-refinery?"
+    assert "suggested_area" not in button.device_info
+    assert button.device_info["configuration_url"] == (
+        "homeassistant://navigate/imprint-refinery/appliances/loft__lamp"
     )
 
 
@@ -376,17 +379,21 @@ def test_existing_appliance_device_receives_missing_area_and_configuration_link(
 ):
     [plan] = project_command_buttons(
         {
-            "locations": {
-                "loft": {
-                    "name": "Loft",
-                    "appliances": {
-                        "receiver": {
-                            "name": "Receiver",
-                            "commands": {"warm": {"name": "Warm", "icon": "mdi:fire"}},
-                        }
-                    },
+            "remote_profiles": {
+                "receiver_profile": {
+                    "name": "Receiver profile",
+                    "appliance_type": "generic",
+                    "commands": {"warm": {"name": "Warm", "icon": "mdi:fire"}},
                 }
-            }
+            },
+            "appliances": {
+                "loft__receiver": {
+                    "name": "Receiver",
+                    "remote_profile_id": "receiver_profile",
+                    "infrared_emitter_ref": "emitter-registry-uuid",
+                    "preferred_platform": "remote",
+                }
+            },
         }
     )
     button = SignalCommandButton(LibraryStub(), plan)
@@ -396,24 +403,13 @@ def test_existing_appliance_device_receives_missing_area_and_configuration_link(
         async_get_devices=Mock(return_value=[device]),
         async_update_device=Mock(),
     )
-    areas = SimpleNamespace(
-        async_get_or_create=Mock(return_value=SimpleNamespace(id="loft-area"))
-    )
-
-    with (
-        patch(
-            "custom_components.imprint_refinery.consumer.dr.async_get",
-            return_value=devices,
-        ),
-        patch(
-            "custom_components.imprint_refinery.consumer.ar.async_get",
-            return_value=areas,
-        ),
+    with patch(
+        "custom_components.imprint_refinery.consumer.dr.async_get",
+        return_value=devices,
     ):
         execute(button.async_added_to_hass())
 
     devices.async_update_device.assert_called_once_with(
         "device-1",
         configuration_url=plan.configuration_url,
-        area_id="loft-area",
     )

@@ -1,4 +1,4 @@
-import type { AnalysisData, CommandEntry, RegistryData } from "../types";
+import type { AnalysisData } from "../types";
 
 export interface BinaryPayload {
   value: string;
@@ -241,113 +241,15 @@ export const slugify = (value: string): string =>
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "");
 
-export const validId = (value: string): boolean => /^[a-z0-9_]+$/.test(value);
-
-export const uniqueKey = (
-  base: string,
-  existing: ReadonlySet<string> | Record<string, unknown>,
-): string => {
-  const occupied = (candidate: string) =>
-    existing instanceof Set
-      ? existing.has(candidate)
-      : Object.hasOwn(existing, candidate);
-  let candidate = base;
-  let suffix = 2;
-  while (occupied(candidate)) candidate = `${base}_${suffix++}`;
-  return candidate;
-};
-
-export const deepActiveElement = (
-  root: Document | ShadowRoot = document,
-): HTMLElement | null => {
-  let active = root.activeElement as HTMLElement | null;
-  while (active?.shadowRoot?.activeElement) {
-    active = active.shadowRoot.activeElement as HTMLElement;
-  }
-  return active;
-};
-
-export const trapTabKey = (
-  event: KeyboardEvent,
-  focusable: HTMLElement[],
-  active: Element | null,
-): void => {
-  if (event.key !== "Tab" || !focusable.length) return;
-  const index = focusable.indexOf(active as HTMLElement);
-  if (event.shiftKey && index <= 0) {
-    event.preventDefault();
-    focusable.at(-1)?.focus();
-  } else if (!event.shiftKey && index === focusable.length - 1) {
-    event.preventDefault();
-    focusable[0].focus();
-  }
-};
-
-const SYSTEM_UNASSIGNED_NAMES = new Set([
-  "",
-  "remote",
-  "unsorted",
-  "unsorted remote",
-]);
-
-export const isSystemUnassigned = (
-  locId: string,
-  applianceId: string,
-  name?: string,
-): boolean =>
-  locId === "unsorted" &&
-  applianceId === "remote" &&
-  SYSTEM_UNASSIGNED_NAMES.has(
-    String(name || "")
-      .trim()
-      .toLocaleLowerCase(),
+export const errorMessage = (error: unknown): string =>
+  String(
+    (error as any)?.message ||
+      (error as any)?.body?.message ||
+      (error as any)?.error ||
+      error,
   );
 
-export const applianceDisplayName = (
-  locId: string,
-  applianceId: string,
-  name?: string,
-  unassignedLabel = "Unassigned commands",
-): string =>
-  isSystemUnassigned(locId, applianceId, name)
-    ? unassignedLabel
-    : String(name || applianceId);
-
-export const locationDisplayName = (locId: string, name?: string): string =>
-  locId === "unsorted" &&
-  ["", "unsorted"].includes(
-    String(name || "")
-      .trim()
-      .toLocaleLowerCase(),
-  )
-    ? ""
-    : String(name || locId);
-
-export const humanizeToken = (value: unknown): string =>
-  String(value || "")
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
-
-export const allCommands = (registry: RegistryData): CommandEntry[] => {
-  const entries: CommandEntry[] = [];
-  for (const [locId, location] of Object.entries(registry.locations || {})) {
-    for (const [applianceId, appliance] of Object.entries(
-      location.appliances || {},
-    )) {
-      for (const [cmdId, command] of Object.entries(appliance.commands || {})) {
-        entries.push({
-          locId,
-          applianceId,
-          cmdId,
-          location,
-          appliance,
-          command,
-        });
-      }
-    }
-  }
-  return entries;
-};
+export const validId = (value: string): boolean => /^[a-z0-9_]+$/.test(value);
 
 export const copyText = async (value: string): Promise<void> => {
   if (navigator.clipboard?.writeText && window.isSecureContext) {
@@ -365,17 +267,23 @@ export const copyText = async (value: string): Promise<void> => {
   if (!copied) throw new Error("Copy was blocked by the browser");
 };
 
+export const safeFilename = (value: string, fallback = "imprint-signal"): string =>
+  value
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || fallback;
+
 export const downloadText = (
   value: string,
   filename: string,
-  type = "text/plain",
+  mediaType = "text/plain;charset=utf-8",
 ): void => {
-  const url = URL.createObjectURL(new Blob([value], { type }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+  const url = URL.createObjectURL(new Blob([value], { type: mediaType }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 };
 
 export const emit = <T>(
@@ -386,43 +294,4 @@ export const emit = <T>(
   target.dispatchEvent(
     new CustomEvent(type, { detail, bubbles: true, composed: true }),
   );
-};
-
-export const friendlyError = (error: any): string => {
-  const detail =
-    error?.message || error?.body?.message || error?.error || String(error);
-  const value = detail.toLowerCase();
-  if (value.includes("timeout") || value.includes("timed out"))
-    return "No signal arrived before the capture window ended.";
-  if (
-    value.includes("emitter") &&
-    (value.includes("unavailable") || value.includes("not configured"))
-  )
-    return "The selected IR emitter is unavailable.";
-  if (value.includes("empty") || value.includes("no code"))
-    return "The receiver returned no IR code.";
-  if (
-    value.includes("send") ||
-    value.includes("delivery") ||
-    value.includes("dispatch")
-  )
-    return "The command could not be sent. Check the emitter and retry.";
-  if (value.includes("storage") || value.includes("save"))
-    return "The command could not be saved. Your work is still available.";
-  return detail;
-};
-
-export const compatibilityLabel = (
-  signal: any,
-  analysis: AnalysisData = {},
-): string => {
-  const warnings = analysis.warnings || [];
-  if (!Array.isArray(signal?.timings) || !signal.timings.length)
-    return "Not evaluated";
-  if (
-    warnings.includes("carrier_frequency_mismatch") ||
-    warnings.includes("provided_carrier_mismatch")
-  )
-    return "Timings fit; carrier may differ";
-  return "Timing payload fits";
 };

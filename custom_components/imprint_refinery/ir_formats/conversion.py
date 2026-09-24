@@ -1,6 +1,7 @@
 """Format-neutral single-signal conversion helpers."""
 
 from dataclasses import dataclass
+import json
 import re
 
 from .flipper import (
@@ -37,6 +38,55 @@ OUTPUT_FORMATS = (
     "flipper",
 )
 PROFILE_OUTPUT_FORMATS = ("girr", "flipper", "lirc")
+
+
+def detect_import_format(value: str) -> str:
+    """Identify a supported import document without guessing ambiguous text."""
+    source = value.strip()
+    if not source:
+        raise IRFormatError("signal data is empty")
+
+    if source.startswith("{"):
+        try:
+            document = json.loads(source)
+        except json.JSONDecodeError:
+            document = None
+        if (
+            isinstance(document, dict)
+            and document.get("schema") == "imprint_refinery.backup"
+        ):
+            return "native_json"
+
+    lowered = source.lower()
+    if "filetype: ir signals file" in lowered:
+        return "flipper"
+    if "begin remote" in lowered and "end remote" in lowered:
+        return "lirc"
+    if source.startswith("<") and (
+        "girr" in lowered or "<remote" in lowered or "<commandset" in lowered
+    ):
+        return "girr"
+
+    tokens = re.findall(r"\S+", source.replace(",", " "))
+    if (
+        len(tokens) >= 6
+        and tokens[0].lower() in {"0000", "0100"}
+        and all(re.fullmatch(r"[0-9a-fA-F]{4}", token) for token in tokens)
+    ):
+        return "pronto"
+
+    if len(tokens) >= 2 and all(re.fullmatch(r"[+-]?\d+", token) for token in tokens):
+        return (
+            "raw_signed"
+            if any(token.startswith(("+", "-")) for token in tokens)
+            else "raw_unsigned"
+        )
+
+    try:
+        decode_zosung(source)
+    except IRFormatError as error:
+        raise IRFormatError("could not detect the IR signal format") from error
+    return "zosung_base64"
 
 
 @dataclass(frozen=True)

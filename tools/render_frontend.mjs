@@ -9,66 +9,55 @@ const views = process.argv.slice(2).length
   ? process.argv.slice(2)
   : [
       "library",
-      "loading",
-      "empty",
-      "offline",
-      "busy",
-      "no-results",
-      "no-blaster",
-      "multiple-blasters",
-      "load-error",
-      "inspector",
-      "inspector-signal",
-      "inspector-code",
-      "inspector-history",
-      "inspector-malformed",
-      "inspector-offline",
-      "inspector-ambiguous",
+      "appliances",
+      "infrared-hardware",
+      "appliance-dialog",
+      "learn-dialog",
       "learn-waiting",
-      "learn-preparing",
       "learn-review",
-      "learn-duplicate",
-      "learn-optimized",
       "learn-error",
-      "catalog-choices",
-      "catalog",
-      "catalog-empty",
-      "guided",
-      "guided-paused",
-      "confirm",
-      "profile",
-      "catalog-import",
-      "catalog-import-preview",
-      "catalog-error",
-      "lab",
-      "lab-decoded",
-      "lab-inferred-binary",
-      "lab-compare",
-      "lab-code",
-      "lab-custom",
-      "lab-invalid",
-      "lab-offline",
-      "lab-preview",
-      "lab-leave",
-      "lab-repeats",
-      "library-unassigned",
-      "dialog-locations",
-      "dialog-add-appliance",
-      "dialog-rename-command",
-      "dialog-delete-command",
-      "dialog-delete-appliance",
-      "dialog-revision-restore",
-      "dialog-command-move",
-      "dialog-command-duplicate",
-      "dialog-command-role",
-      "dialog-command-icon",
-      "dialog-device-move",
-      "dialog-device-settings",
+      "no-receiver-dialog",
+      "profile-dialog",
+      "custom-signal-dialog",
+      "custom-signal-fallback",
+      "catalog-dialog",
+      "confirmation-dialog",
+      "icon-dialog",
+      "bulk-selection",
+      "backup-dialog",
+      "import-dialog",
+      "command-inspector",
+      "command-edit",
+      "command-duplicate",
+      "signal-lab",
+      "empty",
+      "unconfigured-appliance",
+      "offline",
+      "no-blaster",
+      "compatibility-adapter-hardware",
+      "loading",
+      "load-error",
     ];
 const sizes = [
   { name: "desktop", width: 1440, height: 1000 },
+  { name: "narrow", width: 1100, height: 900 },
   { name: "mobile", width: 390, height: 844 },
 ];
+const lightViews = [
+  "library",
+  "appliances",
+  "infrared-hardware",
+  "command-inspector",
+  "command-edit",
+  "command-duplicate",
+  "icon-dialog",
+  "bulk-selection",
+  "signal-lab",
+  "unconfigured-appliance",
+  "offline",
+  "load-error",
+];
+const embeddedViews = ["library", "appliances", "command-inspector", "signal-lab"];
 const server = await startPreviewServer(root);
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({
@@ -81,6 +70,9 @@ try {
     const page = await browser.newPage({
       viewport: { width: size.width, height: size.height },
       deviceScaleFactor: 1,
+    });
+    page.on("pageerror", (error) => {
+      console.error(`Fixture page error (${size.name}): ${error.message}`);
     });
     await page.addInitScript(() => sessionStorage.clear());
     for (const view of views) {
@@ -98,7 +90,6 @@ try {
     }
     await page.close();
   }
-  const lightViews = ["library", "learn-review", "catalog", "lab"];
   for (const size of sizes) {
     const page = await browser.newPage({
       viewport: { width: size.width, height: size.height },
@@ -120,12 +111,26 @@ try {
     }
     await page.close();
   }
-  const defectViews = [
-    "library-unassigned",
-    "inspector-ambiguous",
-    "learn-review",
-    "lab-repeats",
-  ];
+  const embeddedPage = await browser.newPage({
+    viewport: { width: 1440, height: 1000 },
+    deviceScaleFactor: 1,
+  });
+  await embeddedPage.addInitScript(() => sessionStorage.clear());
+  for (const view of embeddedViews) {
+    await embeddedPage.goto(
+      `${server.origin}/tools/browser-fixtures/preview.html?view=${encodeURIComponent(view)}&hostWidth=390`,
+      { waitUntil: "networkidle" },
+    );
+    await embeddedPage.waitForFunction(
+      () => document.documentElement.dataset.fixtureReady === "true",
+    );
+    await embeddedPage.screenshot({
+      path: join(output, `${view}-container-390.png`),
+      fullPage: true,
+    });
+  }
+  await embeddedPage.close();
+  const defectViews = ["offline", "no-blaster", "empty", "unconfigured-appliance"];
   for (const theme of ["dark", "light"]) {
     const page = await browser.newPage({
       viewport: { width: 1024, height: 900 },
@@ -153,5 +158,5 @@ try {
 }
 
 console.log(
-  `Rendered ${(views.length + 4) * sizes.length + 8} fixture views to ${output}`,
+  `Rendered ${views.length * sizes.length + lightViews.length * sizes.length + 8 + embeddedViews.length} fixture views to ${output}`,
 );

@@ -5,40 +5,27 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
-from homeassistant.helpers import (
-    config_validation as cv,
-    device_registry as dr,
-    entity_registry as er,
-)
+from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.typing import ConfigType
 
 from .catalog_sessions import GuidedCatalogSessionManager
-from .const import CONF_IEEE, DOMAIN, HUB_TITLE
+from .const import DOMAIN, HUB_TITLE
 from .device_bridge import (
     async_remove_consumer_device,
-    emitter_metadata,
-    emitter_subentries,
     emitter_subentry_ids,
-    register_emitter_device,
+    remove_legacy_sensor_entities,
     remove_orphan_consumer_devices,
-    start_emitter_name_sync,
 )
-from .emitter_identity import normalize_emitter_ref
 from .frontend_bridge import async_mount_frontend, unmount_frontend
-from .hardware import InfraredHardware, discover_home_assistant_emitters
 from .services import (
     REGISTERED_SERVICES,
     icon_schema,
     register_panel_api,
     register_services,
 )
-from .status import ActivityStatus
 from .storage import SignalLibraryStore
-from .transmission import SignalQueue
 
 PLATFORMS = [
-    Platform.SENSOR,
     Platform.INFRARED,
     Platform.BUTTON,
     Platform.REMOTE,
@@ -66,15 +53,11 @@ async def _async_create_runtime(hass: HomeAssistant) -> dict[str, Any]:
 
     store = SignalLibraryStore(hass)
     await store.async_load()
-    status = ActivityStatus()
-    transport = InfraredHardware(hass)
+    await store.async_refresh_analysis()
     runtime.update(
         {
             "store": store,
-            "status": status,
-            "transport": transport,
             "capture_tasks": {},
-            "signal_queue": SignalQueue(transport, status),
             "catalog_sessions": GuidedCatalogSessionManager(),
         }
     )
@@ -87,25 +70,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.config_entries.async_update_entry(entry, title=HUB_TITLE)
 
     runtime = await _async_create_runtime(hass)
+    runtime["config_entry_id"] = entry.entry_id
     if not runtime.get("frontend_registered"):
         runtime["panel_registered"] = await async_mount_frontend(hass)
         runtime["frontend_registered"] = True
 
     store: SignalLibraryStore = runtime["store"]
+    await store.async_complete_migration(entry.entry_id)
+    remove_legacy_sensor_entities(hass)
     remove_orphan_consumer_devices(hass, entry, store)
-    subentries = emitter_subentries(entry)
-    for subentry in subentries:
-        emitter_id = await store.async_upsert_emitter_from_entry(
-            emitter_metadata(hass, entry, subentry)
-        )
-        register_emitter_device(hass, entry, subentry, emitter_id)
-
-    valid_ids = {
-        normalize_emitter_ref(str(item.data[CONF_IEEE])) for item in subentries
-    }
-    await store.async_reconcile_emitters(valid_ids)
-    start_emitter_name_sync(hass, store, runtime)
-
     if not runtime.get("services_registered"):
         _register_services(hass)
         runtime["services_registered"] = True
@@ -115,9 +88,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(entry.add_update_listener(_async_handle_entry_update))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    await store.async_sync_home_assistant_emitters(
-        discover_home_assistant_emitters(hass)
-    )
     return True
 
 
@@ -133,14 +103,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 def _teardown_domain(hass: HomeAssistant, runtime: dict[str, Any]) -> None:
     for task in runtime.get("capture_tasks", {}).values():
         task.cancel()
-    if signal_queue := runtime.get("signal_queue"):
-        signal_queue.close()
     for service in REGISTERED_SERVICES:
         hass.services.async_remove(DOMAIN, service)
     if runtime.get("panel_registered"):
         unmount_frontend(hass)
-    if unsubscribe := runtime.get("emitter_name_sync_unsub"):
-        unsubscribe()
     hass.data.pop(DOMAIN, None)
 
 
@@ -166,35 +132,4 @@ async def async_remove_config_entry_device(
 
 
 def _register_services(hass: HomeAssistant) -> None:
-    store: SignalLibraryStore = hass.data[DOMAIN]["store"]
-    register_services(
-        hass, lambda reference: resolve_emitter_ref(hass, store, reference)
-    )
-
-
-def resolve_emitter_ref(
-    hass: HomeAssistant, store: SignalLibraryStore, ref: str
-) -> str:
-    """Resolve a stored key, IEEE address, or registered entity ID."""
-    emitters = store.data.get("emitters", {})
-    if ref in emitters:
-        return ref
-    normalized = normalize_emitter_ref(ref)
-    if normalized in emitters:
-        return normalized
-    registry = er.async_get(hass)
-    entity = registry.async_get(ref)
-    if entity is not None and entity.domain == Platform.INFRARED:
-        if entity.platform == DOMAIN and str(entity.unique_id) in emitters:
-            return str(entity.unique_id)
-        match = next(
-            (
-                key
-                for key, record in emitters.items()
-                if record.get("entity_id") in (entity.id, entity.entity_id)
-            ),
-            None,
-        )
-        if match is not None:
-            return match
-    raise ServiceValidationError(f"Unknown IR emitter: {ref}")
+    register_services(hass)

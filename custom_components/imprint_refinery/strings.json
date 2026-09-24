@@ -1,110 +1,75 @@
 {
   "title": "Imprint Refinery",
   "config": {
-    "step": {
-      "user": {
-        "title": "Imprint Refinery",
-        "description": "Home Assistant infrared entities are discovered automatically. Select the automatic option, a detected ZHA compatibility bridge, or manual setup.",
-        "data": {
-          "device": "Infrared hardware"
-        },
-        "data_description": {
-          "device": "Use Home Assistant's infrared entities or select a supported ZHA compatibility bridge."
-        }
-      },
-      "manual": {
-        "title": "Manual ZHA bridge setup",
-        "description": "Use this only when automatic discovery does not list a supported ZHA IR bridge.",
-        "data": {
-          "ieee": "IEEE address",
-          "driver": "Bridge driver",
-          "endpoint_id": "Endpoint",
-          "cluster_id": "IR control cluster",
-          "capture_timeout": "Capture timeout",
-          "capture_reassert_interval": "Capture reassert interval"
-        },
-        "data_description": {
-          "ieee": "ZHA IEEE address of the IR blaster (for example, 00:11:22:ff:fe:33:44:55).",
-          "driver": "Vendor protocol used only by this ZHA compatibility bridge.",
-          "endpoint_id": "ZHA endpoint that exposes the IR control cluster.",
-          "cluster_id": "Manufacturer cluster used for IR capture and sending.",
-          "capture_timeout": "How long, in seconds, capture mode stays active.",
-          "capture_reassert_interval": "How often, in seconds, capture mode is reasserted while waiting for a code."
-        }
-      }
-    },
+    "step": {},
     "error": {
       "device_not_found": "The selected infrared device is no longer available. Refresh the form and try again.",
       "unknown": "Unexpected error"
     },
     "abort": {
       "already_configured": "This IR bridge is already configured",
-      "infrared_entities_auto_discovered": "Home Assistant infrared entities are discovered automatically",
       "single_instance_allowed": "Imprint Refinery is already configured"
     }
   },
-  "entity": {
-    "sensor": {
-      "status": {
-        "name": "Imprint Refinery status",
-        "state": {
-          "idle": "Idle",
-          "capturing": "Capturing",
-          "sending": "Sending",
-          "capture_ready": "Capture ready",
-          "queued": "Queued",
-          "dispatching": "Dispatching",
-          "sent_unconfirmed": "Sent, unconfirmed",
-          "delivery_failed": "Delivery failed",
-          "expired": "Expired",
-          "queue_full": "Queue full",
-          "stopped": "Stopped",
-          "error": "Error"
+  "config_subentries": {
+    "emitter": {
+      "entry_type": "IR emitter",
+      "initiate_flow": {
+        "user": "Add IR emitter",
+        "reconfigure": "Reconfigure IR emitter"
+      },
+      "step": {
+        "user": {
+          "title": "Add IR emitter",
+          "description": "Select a detected ZHA IR blaster, or choose manual setup if a compatible device is not listed.",
+          "data": {
+            "device": "IR blaster"
+          },
+          "data_description": {
+            "device": "Detected compatible ZHA hardware that is not already configured in Imprint Refinery."
+          }
         },
-        "state_attributes": {
-          "last_action": { "name": "Last action" },
-          "last_location_id": { "name": "Last location" },
-          "last_appliance_id": { "name": "Last appliance" },
-          "last_command_id": { "name": "Last command" },
-          "last_error": { "name": "Last error" },
-          "last_error_message": { "name": "Last error message" },
-          "last_updated": { "name": "Last updated" },
-          "last_request_id": { "name": "Last request ID" },
-          "last_dispatch_status": { "name": "Last dispatch status" },
-          "last_emitter_id": { "name": "Last emitter ID" },
-          "last_queue_wait_ms": { "name": "Last queue wait ms" },
-          "last_command_age_ms": { "name": "Last command age ms" },
-          "last_queue_depth": { "name": "Last queue depth" },
-          "delivery_confirmed": { "name": "Delivery confirmed" }
+        "manual": {
+          "title": "Manual ZHA bridge setup",
+          "description": "Use this only when automatic discovery does not list a compatible ZHA IR blaster.",
+          "data": {
+            "ieee": "IEEE address",
+            "driver": "Bridge driver",
+            "endpoint_id": "Endpoint",
+            "cluster_id": "IR control cluster",
+            "capture_timeout": "Capture timeout",
+            "capture_reassert_interval": "Capture reassert interval"
+          },
+          "data_description": {
+            "ieee": "ZHA IEEE address of the IR blaster (for example, 00:11:22:ff:fe:33:44:55).",
+            "driver": "Vendor protocol used only by this ZHA compatibility bridge.",
+            "endpoint_id": "ZHA endpoint that exposes the IR control cluster.",
+            "cluster_id": "Manufacturer cluster used for IR capture and sending.",
+            "capture_timeout": "How long, in seconds, capture mode stays active.",
+            "capture_reassert_interval": "How often, in seconds, capture mode is reasserted while waiting for a code."
+          }
+        },
+        "reconfigure": {
+          "title": "Reconfigure IR emitter",
+          "description": "Adjust how long Imprint Refinery waits for a learned signal from this emitter.",
+          "data": {
+            "capture_timeout": "Capture timeout",
+            "capture_reassert_interval": "Capture reassert interval"
+          },
+          "data_description": {
+            "capture_timeout": "How long, in seconds, capture mode stays active.",
+            "capture_reassert_interval": "How often, in seconds, capture mode is reasserted while waiting for a code."
+          }
         }
+      },
+      "error": {
+        "device_not_found": "The selected IR blaster is no longer available. Refresh the form and try again.",
+        "unknown": "Unexpected error"
+      },
+      "abort": {
+        "already_configured": "This IR blaster is already configured",
+        "reconfigure_successful": "IR emitter settings updated"
       }
-    }
-  },
-  "services": {
-    "send_command": {
-      "name": "Send saved command",
-      "description": "Send one saved command through the targeted Imprint remote entity.",
-      "fields": {
-        "command_id": {
-          "name": "Command",
-          "description": "Saved command ID on the targeted appliance."
-        }
-      }
-    }
-  },
-  "device_automation": {
-    "action_type": {
-      "send_saved_command": "Send a saved command with {entity_name}"
-    },
-    "extra_fields": {
-      "command_id": "Command",
-      "num_repeats": "Repeats",
-      "delay_secs": "Delay seconds"
-    },
-    "extra_fields_descriptions": {
-      "command_id": "Saved command to send.",
-      "num_repeats": "Total number of transmissions.",
-      "delay_secs": "Time between transmissions."
     }
   },
   "exceptions": {
@@ -127,7 +92,6 @@
     "capture_timeout": {
       "message": "Timed out while waiting for an IR signal."
     },
-    "queue_full": { "message": "The IR command queue is full." },
     "send_failed": { "message": "Failed to send the IR code." },
     "storage_error": {
       "message": "Failed to read or write the command registry."

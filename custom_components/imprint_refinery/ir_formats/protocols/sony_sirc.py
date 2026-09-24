@@ -1,5 +1,7 @@
 """Sony SIRC waveform generator."""
 
+from infrared_protocols.commands.sony import SonyCommand
+
 from ..model import IRFormatError, IRSignal
 
 CARRIER_HZ = 40_000
@@ -9,7 +11,6 @@ FRAME_PERIOD_US = 45_000
 DEFAULT_REPEATS = 3
 MAX_REPEATS = 20
 
-_COMMAND_BITS = 7
 _DEVICE_BITS = {12: 5, 15: 8, 20: 5}
 _EXTENDED_BITS = 8
 
@@ -20,11 +21,6 @@ def _require_unsigned(name: str, value: int, width: int) -> None:
     maximum = (1 << width) - 1
     if not 0 <= value <= maximum:
         raise IRFormatError(f"{name} must be 0..{maximum} ({width} bits)")
-
-
-def _append_lsb_field(target: list[int], value: int, width: int) -> None:
-    """Append one integer field in SIRC transmission order."""
-    target.extend(1 if value & (1 << position) else 0 for position in range(width))
 
 
 def encode_sony_sirc(
@@ -44,20 +40,23 @@ def encode_sony_sirc(
         raise IRFormatError(f"Sony SIRC supports {supported} bits, not {bits}")
     if repeats < 1 or repeats > MAX_REPEATS:
         raise IRFormatError(f"repeat count must fall between 1 and {MAX_REPEATS}")
-    _require_unsigned("command", command, _COMMAND_BITS)
+    _require_unsigned("command", command, 7)
     _require_unsigned("device", device, device_width)
     if bits == 20:
         _require_unsigned("extended", extended, _EXTENDED_BITS)
 
-    payload: list[int] = []
-    _append_lsb_field(payload, command, _COMMAND_BITS)
-    _append_lsb_field(payload, device, device_width)
-    if bits == 20:
-        _append_lsb_field(payload, extended, _EXTENDED_BITS)
-
-    frame = [HEADER_MARK_US, UNIT_US]
-    frame.extend(
-        duration for bit in payload for duration in (UNIT_US * (bit + 1), UNIT_US)
-    )
-    frame[-1] = max(frame_period_us - sum(frame[:-1]), UNIT_US)
+    address_bits = bits - 7
+    address = device | (extended << device_width if bits == 20 else 0)
+    try:
+        upstream = SonyCommand(
+            address=address,
+            address_bits=address_bits,
+            command=command,
+            modulation=carrier_frequency,
+        )
+    except ValueError as error:
+        raise IRFormatError(str(error)) from error
+    frame = [abs(value) for value in upstream.get_raw_timings()]
+    if frame_period_us != FRAME_PERIOD_US:
+        frame[-1] = max(frame_period_us - sum(frame[:-1]), UNIT_US)
     return IRSignal(frame * repeats, carrier_frequency)

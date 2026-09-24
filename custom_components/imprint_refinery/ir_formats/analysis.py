@@ -8,7 +8,7 @@ from typing import Any
 from .model import IRSignal
 from .recognition import recognize_signal
 
-ANALYZER_VERSION = "generic-6"
+ANALYZER_VERSION = "generic-8"
 DEFAULT_FRAME_GAP_US = 10_000
 _ABSOLUTE_MATCH_TOLERANCE_US = 120
 _RELATIVE_MATCH_TOLERANCE = 0.20

@@ -20,7 +20,9 @@ Raw timing data remains available for inspection, editing, import, and export.
 ## Features
 
 - Learn commands from a physical remote with a timed capture flow.
-- Organize commands by appliance and optional location.
+- Reuse one remote profile across several real appliances without copying its
+  commands or history.
+- Assign each appliance a Home Assistant Area and preferred Core IR emitter.
 - Use saved commands through native `remote`, `media_player`, `switch`, and
   `button` entities.
 - Inspect raw timings, decoded protocols, frame structure, and carrier data.
@@ -37,12 +39,19 @@ entity.
 
 ## In Home Assistant
 
-### Command library
+### Remote profiles
 
-Browse commands by appliance, send them directly, and copy ready-to-use Home
-Assistant actions from the inspector.
+Build reusable command sets by learning, creating, or importing signals. A
+profile shows every appliance that uses it and warns before shared edits.
 
-[![Imprint Refinery command library with a wall-light command open in the inspector](docs/images/command-library.png)](docs/images/command-library.png)
+![Remote profiles workspace](docs/images/remote-profiles.png)
+
+### Appliances
+
+Connect a reusable remote profile to each actual target, Home Assistant Area,
+preferred IR emitter, and standard Home Assistant entity representation.
+
+![Appliances workspace](docs/images/appliances.png)
 
 ### Signal Lab
 
@@ -51,14 +60,11 @@ evidence without changing the protected source signal. Smooth capture jitter
 from measured averages, or preview a canonical rebuild for any recognized
 protocol that supplies a complete encoder.
 
-[![Signal Lab showing a simulated timing envelope and a decoded raw bitstream](docs/images/signal-lab.png)](docs/images/signal-lab.png)
+### Offline catalog search
 
-### Guided catalog matching
-
-Search the bundled offline catalog, test likely matches, and import only the
-commands that work.
-
-[![Guided catalog matching with candidate remotes and command testing controls](docs/images/guided-matching.png)](docs/images/guided-matching.png)
+Search the bundled offline catalog by category, brand, or model and import a
+matching remote profile without a cloud account. After import, create a new
+appliance from that profile or assign it to an appliance you already added.
 
 ## Requirements
 
@@ -72,8 +78,13 @@ Imprint Refinery discovers emitters and receivers exposed through Home
 Assistant's `infrared` entity contract. Hardware using that contract does not
 need an Imprint-specific driver.
 
-The included compatibility driver supports a ZHA-connected Tuya TS1201 / MOES
-UFO-R11 using the `zhaquirks.tuya.ts1201.ZosungIRBlaster` quirk.
+The included compatibility drivers support:
+
+- a ZHA-connected Tuya TS1201 / MOES UFO-R11 using the
+  `zhaquirks.tuya.ts1201.ZosungIRBlaster` quirk;
+- a ZHA-connected HOBEIAN ZG-IR01 using its model-specific custom quirk. This
+  variant converts Core timings to the Broadlink payload required by its
+  firmware while retaining the Zosung Zigbee transfer protocol.
 
 ## Installation
 
@@ -87,6 +98,20 @@ UFO-R11 using the `zhaquirks.tuya.ts1201.ZosungIRBlaster` quirk.
 4. Open **Settings** > **Devices & services** > **Add integration**, then select
    **Imprint Refinery**.
 
+### Infrared hardware
+
+Open **Infrared hardware** in Imprint Refinery to see live Core emitter and
+receiver entities. Use **Open entity** or **Open device** to rename, move,
+enable, disable, or remove native hardware in Home Assistant. Native infrared
+entities are discovered automatically and never need to be added to Imprint.
+
+![Infrared hardware inventory](docs/images/infrared-hardware.png)
+
+**Add compatibility adapter** appears only when Imprint detects supported
+hardware that does not already expose Core Infrared entities. The included ZHA
+adapter remains a thin provider; library and appliance workflows consume its
+standard emitter and receiver entities like any other provider.
+
 ### Manual
 
 Copy `custom_components/imprint_refinery` into your Home Assistant
@@ -99,37 +124,37 @@ dashboard card, and removal.
 ## Learn a command
 
 1. Open **Imprint Refinery** from the Home Assistant sidebar.
-2. Select **Learn command**.
-3. Point the original remote at the IR receiver and press one button.
+2. Open or create a **Remote profile**, then select **Learn command**.
+3. Choose **Learn from IR receiver**, point the original remote at that
+   receiver, and press one button.
 4. Review the captured signal, give it a name, and save it.
-5. Use **Send once** to check the result on the appliance.
+5. Choose **Test with IR emitter** and use **Test once**. This temporary test
+   choice never changes an appliance's preferred emitter.
 
 Infrared is one-way. A successful send means Home Assistant handed the signal
 to the emitter; the appliance does not acknowledge it.
 
 ## Automations
 
-In Home Assistant's automation editor, add a **Device** action, select the
-Imprint appliance, and choose **Send a saved command**. The editor provides a
-named command list plus compact **Repeats** and **Delay seconds** fields.
-
-The resulting action is ordinary Home Assistant YAML:
+Use the appliance's standard Home Assistant entity action. Remote appliances
+use `remote.send_command`; mapped media-player, switch, and command-button
+controls use their native actions. The command Inspector copies ready-to-use
+YAML, for example:
 
 ```yaml
-device_id: 11111111111141118111111111111111
-domain: imprint_refinery
-type: send_saved_command
-entity_id: remote.wall_light
-command_id: warm_white
-num_repeats: 3
-delay_secs: 0.4
+action: remote.send_command
+target:
+  entity_id: remote.wall_light
+data:
+  command: warm_white
+  num_repeats: 3
+  delay_secs: 0.4
 ```
 
 `num_repeats` is the total number of transmissions; the delay applies only
 between them. Each transmission sends the complete saved waveform, including
-any frames the recognized protocol requires for one logical press. The command
-Inspector can copy the ready-to-use action. See
-[Home Assistant actions](docs/SERVICES.md).
+any frames the recognized protocol requires for one logical press. See [Home
+Assistant actions](docs/SERVICES.md).
 
 ## Optional dashboard card
 

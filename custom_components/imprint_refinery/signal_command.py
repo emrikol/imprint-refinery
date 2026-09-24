@@ -11,7 +11,7 @@ from .ir_formats.conversion import DecodedSignal
 
 @dataclass(frozen=True, slots=True)
 class LibraryPath:
-    location_id: str | None = None
+    remote_profile_id: str | None = None
     appliance_id: str | None = None
     command_id: str | None = None
 

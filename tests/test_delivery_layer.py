@@ -4,14 +4,9 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from homeassistant.exceptions import ServiceValidationError
-import pytest
+from homeassistant.components.infrared import InfraredEmitterConsumerEntity
 
-from custom_components.imprint_refinery.consumer import (
-    ProjectionController,
-    SignalSender,
-    emitter_key,
-)
+from custom_components.imprint_refinery.consumer import ProjectionController
 from custom_components.imprint_refinery.entity_projection import project_library
 from custom_components.imprint_refinery.remote import SignalRemote
 from custom_components.imprint_refinery.signal_command import RawSignalCommand
@@ -21,124 +16,78 @@ def execute(awaitable):
     return asyncio.run(awaitable)
 
 
-def one_remote(*, emitter: str | None = None, commands=None):
-    [plan] = project_library(
-        {
-            "locations": {
-                "family_room": {
-                    "appliances": {
-                        "television": {
-                            "name": "Television",
-                            "emitter_id": emitter,
-                            "preferred_platform": "remote",
-                            "commands": commands
-                            or {"power": {"name": "Power", "role": "power_toggle"}},
-                        }
+def library(*, emitter: str = "emitter-registry-uuid", name: str = "Television"):
+    return {
+        "remote_profiles": {
+            "television_remote": {
+                "name": "Television remote",
+                "appliance_type": "generic",
+                "commands": {
+                    "power": {
+                        "name": "Power",
+                        "role": "power_toggle",
+                        "code": "+9000 -4500 +560 -560",
+                        "format": "raw_signed",
                     }
-                }
+                },
             }
-        }
-    )
+        },
+        "appliances": {
+            "family_room__television": {
+                "name": name,
+                "remote_profile_id": "television_remote",
+                "infrared_emitter_ref": emitter,
+                "preferred_platform": "remote",
+            }
+        },
+    }
+
+
+def one_remote(*, emitter: str = "emitter-registry-uuid"):
+    [plan] = project_library(library(emitter=emitter))
     return plan
 
 
 class StoreStub:
-    def __init__(self, *, commands=None) -> None:
-        self.primary = {"ieee": "AA:BB", "config": {}}
-        self.data = {
-            "emitters": {"aabb": self.primary},
-            "locations": {
-                "family_room": {
-                    "appliances": {
-                        "television": {
-                            "name": "Television",
-                            "preferred_platform": "remote",
-                            "commands": commands
-                            or {
-                                "power": {
-                                    "name": "Power",
-                                    "role": "power_toggle",
-                                    "code": "+9000 -4500 +560 -560",
-                                    "format": "raw_signed",
-                                }
-                            },
-                        }
-                    }
-                }
-            },
-        }
+    def __init__(self) -> None:
+        self.data = library()
+        self.hass = object()
 
-    def choose_emitter(self, requested=None):
-        if requested not in (None, "aabb"):
-            from custom_components.imprint_refinery.errors import ImprintRefineryError
-
-            raise ImprintRefineryError("emitter_unavailable", "No such emitter")
-        return self.primary
-
-    def command_at(self, location, appliance, command):
-        return self.data["locations"][location]["appliances"][appliance]["commands"][
-            command
-        ]
+    def command_at(self, profile: str, command: str):
+        return self.data["remote_profiles"][profile]["commands"][command]
 
 
-def test_emitter_key_accepts_object_identity_or_normalized_ieee() -> None:
+def test_projected_entity_uses_core_consumer_send_path(monkeypatch) -> None:
     store = StoreStub()
-    assert emitter_key(store, store.primary) == "aabb"
-    assert emitter_key(store, {"ieee": "aa:bb"}) == "aabb"
-    with pytest.raises(ServiceValidationError, match="not present"):
-        emitter_key(store, {"ieee": "00:00"})
-
-
-def test_sender_resolves_the_infrared_entity_and_preserves_library_path(
-    monkeypatch,
-) -> None:
-    store = StoreStub()
-    plan = one_remote(emitter="aabb")
     registry = SimpleNamespace(
-        async_get_entity_id=lambda domain, platform, unique_id: "infrared.hall_blaster"
+        async_get=lambda entity_id: SimpleNamespace(device_id=None)
     )
-    delivered = AsyncMock()
     monkeypatch.setattr(
         "custom_components.imprint_refinery.consumer.er.async_get",
         lambda hass: registry,
     )
     monkeypatch.setattr(
-        "custom_components.imprint_refinery.consumer.infrared.async_send_command",
-        delivered,
+        "custom_components.imprint_refinery.consumer.er.async_validate_entity_id",
+        lambda registry, reference: "infrared.renamed_emitter",
     )
+    remote = SignalRemote(store, one_remote())
+    remote._send_command = AsyncMock()
 
-    execute(SignalSender(object(), store).send(plan, "power", context="ctx"))
+    execute(remote.async_send_stored_command("power"))
 
-    command = delivered.await_args.args[2]
+    command = remote._send_command.await_args.args[0]
     assert isinstance(command, RawSignalCommand)
     assert command.get_raw_timings() == [9000, -4500, 560, -560]
-    assert command.path.location_id == "family_room"
-    assert command.path.appliance_id == "television"
+    assert command.path.remote_profile_id == "television_remote"
+    assert command.path.appliance_id == "family_room__television"
     assert command.path.command_id == "power"
-    assert delivered.await_args.kwargs == {"context": "ctx"}
-
-
-def test_sender_reports_missing_command_emitter_and_entity(monkeypatch) -> None:
-    store = StoreStub()
-    monkeypatch.setattr(
-        "custom_components.imprint_refinery.consumer.er.async_get",
-        lambda hass: SimpleNamespace(async_get_entity_id=lambda *args: None),
-    )
-
-    with pytest.raises(ServiceValidationError, match="no command_id absent"):
-        execute(SignalSender(object(), store).send(one_remote(), "absent"))
-    with pytest.raises(ServiceValidationError, match="No such emitter"):
-        execute(
-            SignalSender(object(), store).send(one_remote(emitter="wrong"), "power")
-        )
-    with pytest.raises(ServiceValidationError, match="was not found"):
-        execute(SignalSender(object(), store).send(one_remote(), "power"))
 
 
 class ProjectionEntity:
     def __init__(self, store, plan) -> None:
         self.unique_id = plan.entity_key
         self.registry_device_key = plan.registry_device_key
+        self.emitter_reference = plan.emitter
         self.entity_id = None
         self.blueprints = [plan]
         self.async_remove = AsyncMock()
@@ -147,7 +96,7 @@ class ProjectionEntity:
         self.blueprints.append(plan)
 
 
-def test_projection_adds_updates_and_removes_entities(monkeypatch) -> None:
+def test_projection_adds_updates_removes_and_rebinds(monkeypatch) -> None:
     store = StoreStub()
     added = []
     controller = ProjectionController(
@@ -155,14 +104,22 @@ def test_projection_adds_updates_and_removes_entities(monkeypatch) -> None:
     )
     execute(controller.async_sync())
     assert list(controller.entities) == ["family_room__television"]
-    assert len(added) == 1
+    original = added[0]
 
-    store.data["locations"]["family_room"]["appliances"]["television"]["name"] = "TV"
+    store.data["appliances"]["family_room__television"]["name"] = "TV"
     execute(controller.async_sync())
-    assert len(added[0].blueprints) == 2
+    assert len(original.blueprints) == 2
 
-    removed = controller.entities["family_room__television"]
-    store.data["locations"]["family_room"]["appliances"].clear()
+    store.data["appliances"]["family_room__television"]["infrared_emitter_ref"] = (
+        "second-emitter-uuid"
+    )
+    execute(controller.async_sync())
+    replacement = controller.entities["family_room__television"]
+    original.async_remove.assert_awaited_once()
+    assert replacement is not original
+    assert replacement.unique_id == original.unique_id
+    assert replacement.emitter_reference == "second-emitter-uuid"
+
     monkeypatch.setattr(
         "custom_components.imprint_refinery.consumer.er.async_get",
         lambda hass: SimpleNamespace(
@@ -175,20 +132,46 @@ def test_projection_adds_updates_and_removes_entities(monkeypatch) -> None:
         "custom_components.imprint_refinery.consumer.dr.async_get",
         lambda hass: SimpleNamespace(async_get_devices=lambda **kwargs: set()),
     )
+    store.data["appliances"].clear()
     execute(controller.async_sync())
-    removed.async_remove.assert_awaited_once()
+    replacement.async_remove.assert_awaited_once()
     assert controller.entities == {}
 
 
-def test_remote_entity_forwards_a_batch_in_order() -> None:
+def test_remote_entity_forwards_a_batch_in_order(monkeypatch) -> None:
     store = StoreStub()
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.consumer.er.async_get",
+        lambda hass: SimpleNamespace(
+            async_get=lambda entity_id: SimpleNamespace(device_id=None)
+        ),
+    )
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.consumer.er.async_validate_entity_id",
+        lambda registry, reference: "infrared.emitter",
+    )
     remote = SignalRemote(store, one_remote())
     remote.async_send_stored_command = AsyncMock()
     execute(remote.async_send_command(("first", "second", "third")))
     assert [
         call.args[0] for call in remote.async_send_stored_command.await_args_list
-    ] == [
-        "first",
-        "second",
-        "third",
-    ]
+    ] == ["first", "second", "third"]
+
+
+def test_projected_remote_is_a_core_infrared_emitter_consumer(monkeypatch) -> None:
+    store = StoreStub()
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.consumer.er.async_get",
+        lambda hass: SimpleNamespace(
+            async_get=lambda entity_id: SimpleNamespace(device_id=None)
+        ),
+    )
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.consumer.er.async_validate_entity_id",
+        lambda registry, reference: "infrared.renamed_emitter",
+    )
+
+    remote = SignalRemote(store, one_remote())
+
+    assert isinstance(remote, InfraredEmitterConsumerEntity)
+    assert remote._infrared_emitter_entity_id == "infrared.renamed_emitter"

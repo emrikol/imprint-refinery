@@ -109,16 +109,6 @@ export const timingAtTime = (timings: number[], time: number): number => {
   return Math.max(0, timings.length - 1);
 };
 
-export const timingMidpoint = (timings: number[], index: number): number => {
-  const offsets = timingOffsets(timings);
-  const safeIndex = clamp(
-    Math.round(index),
-    0,
-    Math.max(0, timings.length - 1),
-  );
-  return (offsets[safeIndex] + offsets[safeIndex + 1]) / 2;
-};
-
 export const waveGeometry = (
   timings: number[],
   zoom: number,

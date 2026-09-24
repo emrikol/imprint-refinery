@@ -3,1865 +3,928 @@ import { chromium } from "playwright-core";
 import { chromePath, startPreviewServer } from "./preview_server.mjs";
 
 const server = await startPreviewServer();
-const browser = await chromium.launch({
-  executablePath: chromePath,
-  headless: true,
-});
+const browser = await chromium.launch({ executablePath: chromePath, headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-const observedCalls = [];
-const consoleErrors = [];
+const errors = [];
 page.on("console", (message) => {
-  if (message.type() === "error") consoleErrors.push(message.text());
+  if (message.type() === "error") errors.push(message.text());
 });
-page.on("pageerror", (error) => consoleErrors.push(error.message));
+page.on("pageerror", (error) => errors.push(error.message));
 
-const open = async (
-  view,
-  { width, height, theme = "dark", preserveSession = false } = {},
-) => {
-  if (width && height) await page.setViewportSize({ width, height });
-  if (!preserveSession && page.url().startsWith(server.origin))
-    await page.evaluate(() => sessionStorage.clear());
+const open = async (view, width = 1440, height = 1000, options = {}) => {
+  await page.setViewportSize({ width, height });
+  const params = new URLSearchParams({
+    view,
+    theme: options.theme || "dark",
+  });
+  if (options.hostWidth) params.set("hostWidth", String(options.hostWidth));
+  if (options.textScale) params.set("textScale", String(options.textScale));
+  if (options.presentation) params.set("presentation", options.presentation);
+  if (options.optionalPicker) params.set("optionalPicker", "1");
+  if (options.optionalEmpty) params.set("optionalEmpty", "1");
+  if (options.missingTextarea) params.set("missingTextarea", "1");
+  await page.goto(`${server.origin}/tools/browser-fixtures/preview.html?${params}`, { waitUntil: "networkidle" });
+  await page.waitForFunction(() => document.documentElement.dataset.fixtureReady === "true");
+  await page.getByRole("heading", {
+    name: options.presentation === "card"
+      ? "Imprint Refinery"
+      : ["empty", "load-error"].includes(view) ? "Appliances" : "Remote profiles",
+    exact: true,
+  }).waitFor();
+};
+
+const openSignalLab = async (view = "lab", width = 1440, height = 1000) => {
+  await page.setViewportSize({ width, height });
   await page.goto(
-    `${server.origin}/tools/browser-fixtures/preview.html?view=${view}&theme=${theme}`,
+    `${server.origin}/tools/browser-fixtures/preview.html?view=${view}&theme=dark`,
     { waitUntil: "networkidle" },
   );
   await page.waitForFunction(
     () => document.documentElement.dataset.fixtureReady === "true",
   );
+  await page.getByRole("heading", { name: "Signal Lab", exact: true }).waitFor();
+  return page.locator("imprint-signal-lab");
 };
 
-const assertNoHorizontalOverflow = async (label) =>
+const noOverflow = async (label) =>
   assert.equal(
-    await page.evaluate(
-      () =>
-        document.documentElement.scrollWidth <=
-        document.documentElement.clientWidth,
-    ),
+    await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
     true,
     `${label} overflowed horizontally`,
   );
 
-const boxesOverlap = (a, b) =>
-  Boolean(
-    a &&
-      b &&
-      a.x < b.x + b.width &&
-      a.x + a.width > b.x &&
-      a.y < b.y + b.height &&
-      a.y + a.height > b.y,
-  );
-
-try {
-  await open("library", { width: 1440, height: 1000 });
-  await page
-    .getByText("Living room emitter", { exact: true })
-    .first()
-    .waitFor();
-  assert.equal(
-    await page.getByText("10 saved commands", { exact: true }).count(),
-    1,
-  );
-  assert.equal(
-    await page
-      .getByRole("button", { name: "Restore library", exact: true })
-      .count(),
-    0,
-    "Restore remained loose in the Library footer",
-  );
-  const libraryTools = page.getByRole("button", {
-    name: "Library tools",
-    exact: true,
-  });
-  await libraryTools.press("ArrowDown");
-  assert.equal(
-    await page
-      .getByRole("button", { name: "Restore library", exact: true })
-      .count(),
-    1,
-    "Library menu did not expose Restore",
-  );
-  await page.keyboard.press("Escape");
-  assert.equal(
-    await page
-      .locator("imprint-library-browser details.library-menu[open]")
-      .count(),
-    0,
-    "Escape did not close the Library menu",
-  );
-  assert.equal(
-    await libraryTools.evaluate(
-      (element) => element.getRootNode().activeElement === element,
-    ),
-    true,
-    "Library menu did not return focus to its trigger",
-  );
-  await page
-    .getByRole("button", { name: "Add appliance", exact: true })
-    .click();
-  const addApplianceDialog = page.getByRole("dialog", {
-    name: "Add appliance",
-  });
-  await addApplianceDialog.waitFor();
-  assert.equal(
-    await page
-      .locator("imprint-dialog input[autofocus]")
-      .getAttribute("placeholder"),
-    "e.g. Floor lamp",
-    "Add appliance prompt was not a real placeholder",
-  );
-  await addApplianceDialog
-    .getByRole("button", { name: "Close", exact: true })
-    .click();
-  assert.equal(
-    await page
-      .locator("imprint-command-inspector .metric > span", {
-        hasText: /^Evidence$/,
-      })
-      .count(),
-    0,
-    "Inspector repeated recognition evidence as a metric tile",
-  );
-  await page.evaluate(
-    () =>
-      import(
-        "/custom_components/imprint_refinery/www/imprint-refinery-card.js?duplicate-load-smoke"
-      ),
-  );
-  await page.getByText("Use in Home Assistant", { exact: true }).waitFor();
-  assert.equal(
-    await page
-      .getByText("This command is available as media_player.television.", {
-        exact: true,
-      })
-      .count(),
-    1,
-    "Inspector did not expose the projected Home Assistant entity",
-  );
-  await page.getByRole("button", { name: "Copy action", exact: true }).click();
-  assert.equal(
-    await page
-      .getByRole("button", { name: "Copy entity ID", exact: true })
-      .count(),
-    1,
-    "Inspector did not expose entity-ID reuse",
-  );
-  assert.equal(
-    await page
-      .getByRole("link", { name: "Open device", exact: true })
-      .getAttribute("href"),
-    "/config/devices/device/fixture-tv",
-    "Inspector did not link to the Home Assistant device",
-  );
-  await page
-    .locator("imprint-library-browser .command-open", { hasText: "Input" })
-    .click();
-  await page
-    .locator("imprint-command-inspector .head h2", { hasText: "Input" })
-    .waitFor();
-  assert.equal(
-    await page
-      .locator("imprint-command-inspector pre.code", {
-        hasText: "media_player.select_source",
-      })
-      .count(),
-    1,
-    "Inspector did not reuse the native source-selection action",
-  );
-  await page
-    .locator("imprint-library-browser .command-open", { hasText: "Power" })
-    .first()
-    .click();
-  await page
-    .locator("imprint-command-inspector .head h2", { hasText: "Power" })
-    .waitFor();
-  await page.getByRole("tab", { name: "Code" }).click();
-  await page.getByRole("button", { name: "Copy", exact: true }).click();
-  await page.getByRole("tab", { name: "History" }).click();
-  await page.getByText("Revision 4", { exact: true }).waitFor();
-  await page.getByRole("tab", { name: "Signal" }).click();
-  await page.getByRole("button", { name: "Open in Signal Lab" }).click();
-  await page.getByText("Signal Lab", { exact: true }).waitFor();
-  await page.getByText("Optimize for one press", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "Compare" }).click();
-  await page
-    .locator("button:visible")
-    .filter({ hasText: "+10" })
-    .first()
-    .click();
-  await page.getByRole("button", { name: "Return to command library" }).click();
-  await page.getByRole("button", { name: "Continue editing" }).click();
-  observedCalls.push(
-    ...(await page.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls)),
-  );
-
-  await open("library", { width: 1440, height: 1000 });
-  await page
-    .locator("imprint-library-browser .command-open", { hasText: "Power" })
-    .first()
-    .click();
-  await page.getByRole("tab", { name: "Signal", exact: true }).click();
-  await page
-    .locator("imprint-command-inspector")
-    .getByRole("button", { name: "Zoom in" })
-    .click();
-  assert.equal(
-    await page
-      .locator("imprint-command-inspector imprint-waveform")
-      .evaluate((element) => element.zoom),
-    2,
-    "Inspector signal zoom did not change",
-  );
-  await page
-    .locator("imprint-library-browser .command-open", { hasText: "Volume up" })
-    .first()
-    .click();
-  assert.equal(
-    await page
-      .getByRole("tab", { name: "Signal", exact: true })
-      .getAttribute("aria-selected"),
-    "true",
-    "Inspector tab reset when a different command was selected",
-  );
-  assert.equal(
-    await page
-      .locator("imprint-command-inspector imprint-waveform")
-      .evaluate((element) => element.zoom),
-    2,
-    "Inspector signal view reset when a different command was selected",
-  );
-  await page.getByRole("tab", { name: "Code", exact: true }).click();
-  await page.getByText("Raw bitstream", { exact: true }).waitFor();
-  assert(
-    (
-      await page.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls)
-    ).some((call) => (call.action || call.service) === "analyze_signal"),
-    "stored command analysis was not refreshed for the new binary decoder",
-  );
-  await page
-    .locator("imprint-command-inspector label.field", {
-      hasText: "Bitstream decoder",
-    })
-    .locator("select")
-    .selectOption("pulse_distance");
-  assert.equal(
-    await page.getByText("100% timing fit", { exact: true }).count(),
-    1,
-    "manual timing decoder did not expose its fit score",
-  );
-  await page
-    .locator("imprint-command-inspector label.field", {
-      hasText: "Representation",
-    })
-    .locator("select")
-    .selectOption("pronto");
-  await page
-    .locator("imprint-command-inspector pre.code", { hasText: /^0000 006D/ })
-    .waitFor();
-  await page
-    .locator("imprint-library-browser .command-open", { hasText: "Power" })
-    .first()
-    .click();
-  assert.equal(
-    (
-      await page.locator("imprint-command-inspector .head h2").textContent()
-    )?.trim(),
-    "Volume up",
-    "Inspector replaced the command before its selected representation was ready",
-  );
-  assert.equal(
-    await page.getByText("Converting representation…", { exact: true }).count(),
-    0,
-    "command switching flashed a conversion placeholder",
-  );
-  await page
-    .locator("imprint-command-inspector .head h2", { hasText: "Power" })
-    .waitFor();
-  await page
-    .locator("imprint-library-browser .command-open", { hasText: "Volume up" })
-    .first()
-    .click();
-  assert.equal(
-    (
-      await page.locator("imprint-command-inspector .head h2").textContent()
-    )?.trim(),
-    "Volume up",
-    "cached representation did not switch atomically",
-  );
-  assert.equal(
-    await page
-      .locator("imprint-command-inspector label.field", {
-        hasText: "Bitstream decoder",
-      })
-      .locator("select")
-      .inputValue(),
-    "pulse_distance",
-    "manual bitstream decoder reset when a different command was selected",
-  );
-  assert.equal(
-    await page.getByText("Converting representation…", { exact: true }).count(),
-    0,
-    "cached command switch flashed a conversion placeholder",
-  );
-
-  await open("library", { width: 1024, height: 900 });
-  const rememberedSearch = page.getByPlaceholder(
-    "Search appliances and commands",
-  );
-  await rememberedSearch.fill("Volume");
-  await page
-    .locator("imprint-library-browser .command-open", { hasText: "Volume up" })
-    .first()
-    .click();
-  await page.getByRole("tab", { name: "Signal", exact: true }).click();
-  await page.getByRole("button", { name: "Open in Signal Lab" }).click();
-  await page.getByRole("button", { name: "Return to command library" }).click();
-  assert.equal(
-    await rememberedSearch.inputValue(),
-    "Volume",
-    "Library search was lost after returning from Signal Lab",
-  );
-  await page.reload({ waitUntil: "networkidle" });
-  await page.waitForFunction(
-    () => document.documentElement.dataset.fixtureReady === "true",
-  );
-  assert.equal(
-    await page.getByPlaceholder("Search appliances and commands").inputValue(),
-    "Volume",
-    "Library search was lost after refresh",
-  );
-  await page.getByPlaceholder("Search appliances and commands").fill("");
-  await page.getByLabel("Filter by location").selectOption("living_room");
-  assert.equal(
-    JSON.parse(
-      await page.evaluate(
-        () =>
-          sessionStorage.getItem("imprint-refinery.library-view.v1") || "{}",
-      ),
-    )?.locationFilter,
-    "living_room",
-    "Library location filter was not persisted when changed",
-  );
-  await page.reload({ waitUntil: "networkidle" });
-  await page.waitForFunction(
-    () => document.documentElement.dataset.fixtureReady === "true",
-  );
-  const restoredLocationState = JSON.parse(
-    await page.evaluate(
-      () => sessionStorage.getItem("imprint-refinery.library-view.v1") || "{}",
-    ),
-  );
-  assert.equal(
-    await page.getByLabel("Filter by location").inputValue(),
-    "living_room",
-    `Library location filter was lost after refresh: ${JSON.stringify(restoredLocationState)}`,
-  );
-
-  await open("library", { width: 1440, height: 1000 });
-  await page
-    .getByRole("button", { name: "Select commands in Television" })
-    .click();
-  await page
-    .locator("imprint-library-browser .selection-bar input[type=checkbox]")
-    .check();
-  await page.getByText("5 selected", { exact: true }).waitFor();
-  assert.equal(
-    await page
-      .locator("imprint-library-browser .command.multi-selected")
-      .count(),
-    5,
-    "Select all did not select every command in the appliance group",
-  );
-  await page.reload({ waitUntil: "networkidle" });
-  await page.waitForFunction(
-    () => document.documentElement.dataset.fixtureReady === "true",
-  );
-  await page.getByText("5 selected", { exact: true }).waitFor();
-  assert.equal(
-    await page
-      .locator("imprint-library-browser .command.multi-selected")
-      .count(),
-    5,
-    "Command selection was lost after refresh",
-  );
-  await page
-    .getByLabel("Move selected commands to")
-    .selectOption("bedroom||fan");
-  await page.getByRole("button", { name: "Move 5", exact: true }).click();
-  await page.getByText("Moved 5 commands to Fan.", { exact: true }).waitFor();
-  const bulkMoveCalls = (
-    await page.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls)
-  ).filter((call) => (call.action || call.service) === "move_command");
-  assert.equal(
-    bulkMoveCalls.length,
-    5,
-    "bulk organization did not move every selected command",
-  );
-  assert(
-    bulkMoveCalls.every(
-      (call) =>
-        (call.data?.target_location_id ||
-          call.service_data?.target_location_id) === "bedroom" &&
-        (call.data?.target_appliance_id ||
-          call.service_data?.target_appliance_id) === "fan",
-    ),
-    "bulk organization did not preserve the chosen destination appliance",
-  );
-
-  await open("library", { width: 1440, height: 1000 });
-  await page.getByRole("button", { name: "Learn command" }).click();
-  await page.getByText("Command captured", { exact: true }).waitFor();
-  const learnDialog = page.getByRole("dialog", { name: "Command captured" });
-  const learnClose = learnDialog.getByRole("button", {
-    name: "Cancel capture",
-    exact: true,
+const noHostOverflow = async (label) => {
+  const measurements = await page.locator("#preview").evaluate((preview) => {
+    const card = preview.querySelector("imprint-refinery-card");
+    const app = card?.shadowRoot?.querySelector(".app");
+    return [preview, card, app].filter(Boolean).map((element) => ({
+      name: element.tagName?.toLowerCase?.() || element.className,
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+    }));
   });
   assert.equal(
-    await learnDialog.getAttribute("aria-modal"),
-    "true",
-    "Learn review did not expose modal semantics",
-  );
-  assert.equal(
-    await page.locator("imprint-library-inspector").getAttribute("inert"),
-    "",
-    "Learn flow did not make the covered Library inert",
-  );
-  assert.equal(
-    await page.locator("imprint-library-inspector").getAttribute("aria-hidden"),
-    "true",
-    "Learn flow did not hide the covered Library from assistive technology",
-  );
-  assert.equal(
-    await learnClose.evaluate(
-      (element) => element.getRootNode().activeElement === element,
-    ),
+    measurements.every(({ clientWidth, scrollWidth }) => scrollWidth <= clientWidth + 1),
     true,
-    "Learn review did not move focus into the dialog",
+    `${label} overflowed its Home Assistant card container: ${JSON.stringify(measurements)}`,
   );
-  await learnClose.press("Shift+Tab");
-  await page.keyboard.press("Tab");
+};
+
+const assertFocusContained = async (dialog, label, tabs = 6) => {
+  await page.waitForTimeout(30);
   assert.equal(
-    await learnClose.evaluate(
-      (element) => element.getRootNode().activeElement === element,
-    ),
+    await dialog.evaluate((element) => element.matches(":focus-within")),
     true,
-    "Learn dialog focus did not wrap at its boundary",
-  );
-  assert.equal(
-    await page
-      .getByRole("button", { name: "Cancel capture", exact: true })
-      .getAttribute("title"),
-    "Cancel capture",
-    "Captured-command close control had no visible tooltip",
-  );
-  assert.equal(
-    await page.getByLabel("Command name", { exact: true }).inputValue(),
-    "",
-    "Learn review inserted prompt copy as a field value",
-  );
-  assert.equal(
-    await page
-      .getByLabel("Command name", { exact: true })
-      .getAttribute("placeholder"),
-    "Power",
-    "Learn review did not expose a real command-name placeholder",
-  );
-  await page.getByLabel("Command name", { exact: true }).fill("Fixture power");
-  assert.equal(
-    await page
-      .locator("imprint-learn-flow label.field", {
-        hasText: "Appliance (optional)",
-      })
-      .locator("select")
-      .isVisible(),
-    true,
-  );
-  await page.getByText("Technical details", { exact: true }).click();
-  await page
-    .locator("imprint-learn-flow label.field", {
-      hasText: "Home Assistant shortcut (optional)",
-    })
-    .locator("select")
-    .selectOption("");
-  await page.getByRole("button", { name: "Test once" }).click();
-  await page.getByRole("button", { name: "Save command" }).click();
-  await page.getByText("Saved Fixture power.", { exact: true }).waitFor();
-  assert.equal(
-    await page.locator("imprint-library-inspector").getAttribute("inert"),
-    null,
-    "Library stayed inert after Learn closed",
-  );
-  const learnTrigger = page.getByRole("button", { name: "Learn command" });
-  await learnTrigger.click();
-  await page.getByRole("dialog", { name: "Command captured" }).waitFor();
-  await page.keyboard.press("Escape");
-  await page.waitForFunction(
-    () =>
-      !document
-        .querySelector("imprint-refinery-card")
-        ?.shadowRoot?.querySelector("imprint-learn-flow"),
-  );
-  await page.waitForFunction(() => {
-    const inspector = document
-      .querySelector("imprint-refinery-card")
-      ?.shadowRoot?.querySelector("imprint-library-inspector");
-    const picker = inspector?.shadowRoot?.querySelector(
-      "imprint-emitter-picker",
-    );
-    const trigger = picker?.shadowRoot?.querySelector("button");
-    return Boolean(trigger && trigger.getRootNode().activeElement === trigger);
-  });
-  assert.equal(
-    await learnTrigger.evaluate(
-      (element) => element.getRootNode().activeElement === element,
-    ),
-    true,
-    "Learn flow did not return focus to its opener after Escape",
-  );
-  observedCalls.push(
-    ...(await page.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls)),
-  );
-
-  await open("library");
-  await page.getByRole("button", { name: "Find codes" }).click();
-  await page.getByRole("button", { name: "Find by brand or model" }).click();
-  await page.getByLabel("Brand").fill("Vizio");
-  await page.getByRole("button", { name: "Search codes" }).click();
-  await page.getByText("Vizio Common TV family", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "Preview" }).click();
-  await page.getByText("4 selected", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "Import starter" }).click();
-  await page.getByText("Imported 4 commands.", { exact: true }).waitFor();
-  observedCalls.push(
-    ...(await page.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls)),
-  );
-
-  await open("library");
-  await page.getByRole("button", { name: "Find codes" }).click();
-  await page.getByRole("button", { name: "Find by brand or model" }).click();
-  await page.getByLabel("Brand").fill("Vizio");
-  await page.getByRole("button", { name: "Search codes" }).click();
-  await page.getByRole("button", { name: "Test this remote" }).click();
-  await page.getByText("Make sure the TV is on", { exact: true }).waitFor();
-  await page.locator("imprint-catalog-guided button.primary.wide").click();
-  await page.getByRole("button", { name: "It worked" }).click();
-  await page
-    .getByText("Your appliance responded to this code", { exact: true })
-    .waitFor();
-  await page
-    .getByRole("button", { name: "Review and import commands" })
-    .click();
-  observedCalls.push(
-    ...(await page.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls)),
-  );
-
-  await open("library-unassigned", { width: 1024, height: 900 });
-  await page.getByText("Unassigned commands", { exact: true }).waitFor();
-  assert.equal(
-    await page.getByText("Unsorted remote", { exact: true }).count(),
-    0,
-    "synthetic appliance leaked into the UI",
-  );
-  assert.equal(
-    await page.getByText("/ Unsorted", { exact: true }).count(),
-    0,
-    "synthetic location leaked into the UI",
-  );
-  const searchBox = await page
-    .locator("imprint-library-browser .search")
-    .boundingBox();
-  const filtersBox = await page
-    .locator("imprint-library-browser .filters")
-    .boundingBox();
-  assert.equal(
-    boxesOverlap(searchBox, filtersBox),
-    false,
-    "library search and filters overlap",
-  );
-  const sendButtonBox = await page
-    .getByRole("button", { name: "Send Lamp on once" })
-    .boundingBox();
-  const overflowButtonBox = await page
-    .getByRole("button", { name: "Actions for Lamp on" })
-    .boundingBox();
-  assert(
-    sendButtonBox && overflowButtonBox,
-    "command card action controls did not render",
-  );
-  assert(
-    Math.abs(sendButtonBox.width - sendButtonBox.height) <= 1,
-    `Send once control was not 1:1: ${JSON.stringify(sendButtonBox)}`,
-  );
-  assert(
-    Math.abs(sendButtonBox.width - overflowButtonBox.width) <= 1 &&
-      Math.abs(sendButtonBox.height - overflowButtonBox.height) <= 1,
-    `command card action controls did not share a footprint: ${JSON.stringify({ sendButtonBox, overflowButtonBox })}`,
-  );
-  const commandCard = page
-    .getByRole("button", { name: "Send Lamp on once" })
-    .locator("xpath=..");
-  const commandCardBeforeSend = await commandCard.boundingBox();
-  await page.getByRole("button", { name: "Send Lamp on once" }).click();
-  await page
-    .locator(
-      'imprint-library-browser button.send.success ha-icon[icon="mdi:check"]',
-    )
-    .waitFor({ state: "attached" });
-  const commandCardAfterSend = await commandCard.boundingBox();
-  assert(
-    commandCardBeforeSend && commandCardAfterSend,
-    "command card disappeared after Send once",
-  );
-  assert(
-    Math.abs(commandCardBeforeSend.y - commandCardAfterSend.y) <= 0.5 &&
-      Math.abs(commandCardBeforeSend.height - commandCardAfterSend.height) <=
-        0.5,
-    `Send feedback changed command-card geometry: ${JSON.stringify({ commandCardBeforeSend, commandCardAfterSend })}`,
-  );
-  assert.equal(
-    await page.locator("imprint-library-browser .send-result").count(),
-    0,
-    "Send once rendered a layout-shifting feedback row",
-  );
-  assert.notEqual(
-    await page
-      .getByRole("button", { name: "Send Lamp on once" })
-      .evaluate((element) => getComputedStyle(element).backgroundColor),
-    "rgba(0, 0, 0, 0)",
-    "successful Send once did not color the control",
-  );
-  await page.waitForFunction(
-    () =>
-      document
-        .querySelector("imprint-refinery-card")
-        ?.shadowRoot?.querySelector("imprint-library-inspector")
-        ?.shadowRoot?.querySelector("imprint-library-browser")
-        ?.shadowRoot?.querySelector("button.send ha-icon")
-        ?.getAttribute("icon") === "mdi:send",
-  );
-  assert.equal(
-    await page.locator("imprint-library-browser button.send.success").count(),
-    0,
-    "successful Send once did not reset after one second",
-  );
-  await page.getByRole("button", { name: "Actions for Lamp on" }).click();
-  await page.waitForTimeout(50);
-  const menuTriggerBox = await page
-    .getByRole("button", { name: "Actions for Lamp on" })
-    .boundingBox();
-  const menuBox = await page
-    .locator("imprint-library-browser details.menu[open] .menu-popover")
-    .boundingBox();
-  assert(
-    menuBox &&
-      menuBox.x >= 0 &&
-      menuBox.y >= 0 &&
-      menuBox.x + menuBox.width <= 1024 &&
-      menuBox.y + menuBox.height <= 900,
-    `command menu escaped the viewport: ${JSON.stringify(menuBox)}`,
-  );
-  assert(
-    menuTriggerBox &&
-      Math.min(
-        Math.abs(menuBox.x - menuTriggerBox.x),
-        Math.abs(
-          menuBox.x + menuBox.width - (menuTriggerBox.x + menuTriggerBox.width),
-        ),
-      ) <= 12,
-    `command menu detached horizontally from its trigger: ${JSON.stringify({ menuBox, menuTriggerBox })}`,
-  );
-  assert(
-    Math.abs(menuBox.y - (menuTriggerBox.y + menuTriggerBox.height)) <= 12 ||
-      Math.abs(menuBox.y + menuBox.height - menuTriggerBox.y) <= 12,
-    "command menu detached vertically from its trigger",
-  );
-  const commandCardBeforeCopy = await commandCard.boundingBox();
-  await page.getByRole("button", { name: "Copy code", exact: true }).click();
-  await page
-    .locator(
-      'imprint-library-browser summary.action-success ha-icon[icon="mdi:check"]',
-    )
-    .waitFor({ state: "attached" });
-  const commandCardAfterCopy = await commandCard.boundingBox();
-  assert(
-    commandCardBeforeCopy &&
-      commandCardAfterCopy &&
-      Math.abs(commandCardBeforeCopy.height - commandCardAfterCopy.height) <=
-        0.5,
-    "Copy feedback changed command-card geometry",
-  );
-  await page.getByRole("button", { name: "Actions for Lamp on" }).click();
-  await page.getByRole("button", { name: "Choose icon", exact: true }).click();
-  const iconDialog = page.getByRole("dialog", {
-    name: "Edit icon for Lamp on",
-  });
-  await iconDialog.waitFor();
-  const iconEditor = page.locator("imprint-library-browser .icon-editor");
-  assert.equal(
-    (
-      await iconEditor.locator(".icon-preview-copy small").textContent()
-    )?.trim(),
-    "mdi:power",
-    "icon editor did not preview the stored per-command icon",
-  );
-  await iconEditor.getByLabel("Home Assistant icon").fill("mdi:fan");
-  assert.equal(
-    await iconEditor.locator(".icon-preview > ha-icon").getAttribute("icon"),
-    "mdi:fan",
-    "icon preview did not update with the selected icon",
-  );
-  await iconEditor
-    .getByRole("button", { name: "Use default", exact: true })
-    .click();
-  assert.equal(
-    await iconEditor.locator(".icon-preview > ha-icon").getAttribute("icon"),
-    "mdi:remote",
-    "default reset did not restore the remote icon preview",
-  );
-  await iconEditor.getByLabel("Home Assistant icon").fill("mdi:fan");
-  await page
-    .locator("imprint-library-browser .dialog-actions")
-    .getByRole("button", { name: "Save", exact: true })
-    .click();
-  const iconCalls = await page.evaluate(
-    () => window.__IMPRINT_REFINERY_FIXTURES__.calls,
-  );
-  const iconUpdate = iconCalls.find(
-    (call) =>
-      (call.action || call.service) === "update_command" &&
-      (call.service_data?.icon || call.data?.icon) === "mdi:fan",
-  );
-  assert(
-    iconUpdate,
-    `per-command icon selection did not reach update_command: ${JSON.stringify(iconCalls.slice(-5))}`,
-  );
-  await assertNoHorizontalOverflow("1024px one-command library");
-
-  await open("inspector-ambiguous", { width: 1024, height: 900 });
-  assert.equal(
-    await page.getByText("Unsorted remote", { exact: true }).count(),
-    0,
-  );
-  assert.equal(
-    await page
-      .getByText("ambiguous protocol candidates", { exact: true })
-      .count(),
-    0,
-  );
-  assert.equal(
-    await page.getByText("ambiguous repeat semantics", { exact: true }).count(),
-    0,
-  );
-  assert.equal(
-    await page.getByText("Single Press Optimization", { exact: true }).count(),
-    1,
-  );
-  const remoteAction = page.locator("imprint-command-inspector pre.code");
-  const remoteActionYaml = (await remoteAction.textContent()) || "";
-  assert.match(
-    remoteActionYaml,
-    /device_id: fixture-remote/,
-    "Imprint action omitted the appliance device",
-  );
-  assert.match(
-    remoteActionYaml,
-    /domain: imprint_refinery/,
-    "remote command did not use the named Imprint device action",
-  );
-  assert.match(
-    remoteActionYaml,
-    /type: send_saved_command/,
-    "Imprint action omitted its action type",
-  );
-  assert.match(
-    remoteActionYaml,
-    /entity_id: remote\.unsorted_remote/,
-    "Imprint action targeted the command button instead of the appliance remote",
-  );
-  assert.match(
-    remoteActionYaml,
-    /command_id: "lamp_on"/,
-    "Imprint action omitted the saved command ID",
-  );
-  assert.match(
-    remoteActionYaml,
-    /num_repeats: 1/,
-    "Imprint action did not expose the send count",
-  );
-  assert.match(
-    remoteActionYaml,
-    /delay_secs: 0\.4/,
-    "Imprint action did not expose the inter-repeat delay",
-  );
-  assert.doesNotMatch(
-    remoteActionYaml,
-    /remote\.send_command|button\.press|homeassistant\.turn_on|hold_secs/,
-    "Inspector retained the generic automation editor fields",
-  );
-  await page.getByRole("tab", { name: "Signal" }).click();
-  await page.getByRole("button", { name: "Open in Signal Lab" }).waitFor();
-  await assertNoHorizontalOverflow("ambiguous Inspector");
-
-  await open("inspector-single-frame", { width: 1024, height: 900 });
-  const capturedRepeats = page.locator("imprint-command-inspector .metric", {
-    hasText: "Captured repeats",
-  });
-  const requiredRepeats = page.locator("imprint-command-inspector .metric", {
-    hasText: "Required repeats",
-  });
-  assert.equal(
-    (await capturedRepeats.locator("strong").textContent())?.trim(),
-    "0",
-    "a single NEC frame was not reported as zero captured repeats",
-  );
-  assert.equal(
-    (await requiredRepeats.locator("strong").textContent())?.trim(),
-    "None",
-    "NEC incorrectly claimed that a one-press command requires repeats",
-  );
-  assert.match(
-    (await requiredRepeats.locator("small").textContent()) || "",
-    /No repeats are required for one press/,
-    "the required-repeat explanation did not distinguish one-press behavior from hold behavior",
-  );
-  await assertNoHorizontalOverflow("single-frame Inspector");
-
-  await open("lab", { width: 1024, height: 900 });
-  const smoothingLab = page.locator("imprint-signal-lab");
-  assert.equal(
-    await smoothingLab
-      .getByRole("button", { name: "Normalize", exact: true })
-      .count(),
-    0,
-    "legacy Normalize action remained visible",
-  );
-  assert.equal(
-    await smoothingLab.getByText("Known protocol", { exact: true }).count(),
-    0,
-    "disabled protocol-generation choice remained visible",
-  );
-  await smoothingLab
-    .getByRole("button", { name: "Preview smoothing", exact: true })
-    .click();
-  const smoothingDialog = page.getByRole("dialog", {
-    name: "Smooth timing jitter",
-  });
-  await smoothingDialog.waitFor();
-  assert.match(
-    (await smoothingDialog.textContent()) || "",
-    /Protocol rules were not used/i,
-    "smoothing preview did not disclose its measured-data basis",
-  );
-  assert.match(
-    (await page
-      .locator("imprint-signal-lab .preview-metrics .metric", {
-        hasText: "Timing basis",
-      })
-      .textContent()) || "",
-    /Current-draft averages/,
-    "smoothing preview did not name its timing basis",
-  );
-  const smoothingOriginal = await smoothingLab.evaluate((element) => [
-    ...element.lab.original,
-  ]);
-  await page
-    .getByRole("button", { name: "Apply smoothed timings", exact: true })
-    .click();
-  const smoothedState = await smoothingLab.evaluate((element) => ({
-    original: element.lab.original,
-    timings: element.lab.timings,
-    dirty: element.lab.dirty,
-  }));
-  assert.deepEqual(
-    smoothedState.original,
-    smoothingOriginal,
-    "smoothing changed the protected source signal",
-  );
-  assert.notDeepEqual(
-    smoothedState.timings,
-    smoothingOriginal,
-    "smoothing did not change the jittered draft",
-  );
-  assert.equal(
-    smoothedState.dirty,
-    true,
-    "smoothing did not keep the result as an editable draft",
-  );
-
-  await open("lab-rebuildable-sirc", { width: 1024, height: 900 });
-  const rebuildLab = page.locator("imprint-signal-lab");
-  await rebuildLab
-    .getByRole("button", { name: "Preview SIRC rebuild", exact: true })
-    .click();
-  const rebuildDialog = page.getByRole("dialog", { name: "Rebuild as SIRC" });
-  await rebuildDialog.waitFor();
-  assert.match(
-    (await rebuildDialog.textContent()) || "",
-    /SIRC protocol definition/i,
-    "protocol rebuild did not disclose its canonical timing source",
-  );
-  assert.match(
-    (await page
-      .locator("imprint-signal-lab .preview-metrics .metric", {
-        hasText: "Carrier",
-      })
-      .textContent()) || "",
-    /38\.0\s*→\s*40\.0\s+kHz/,
-    "protocol rebuild did not preview the canonical carrier change",
-  );
-  const rebuildSource = await rebuildLab.evaluate((element) => ({
-    timings: [...element.lab.original],
-    carrier: element.lab.originalCarrierFrequency,
-  }));
-  await page
-    .getByRole("button", { name: "Apply SIRC rebuild", exact: true })
-    .click();
-  const rebuiltState = await rebuildLab.evaluate((element) => ({
-    original: element.lab.original,
-    originalCarrier: element.lab.originalCarrierFrequency,
-    timings: element.lab.timings,
-    carrier: element.lab.carrierFrequency,
-    roles: element.lab.frameRoles,
-    dirty: element.lab.dirty,
-  }));
-  assert.deepEqual(
-    rebuiltState.original,
-    rebuildSource.timings,
-    "protocol rebuild changed the protected source timings",
-  );
-  assert.equal(
-    rebuiltState.originalCarrier,
-    rebuildSource.carrier,
-    "protocol rebuild changed the protected source carrier",
-  );
-  assert.equal(
-    rebuiltState.carrier,
-    40000,
-    "protocol rebuild did not apply the SIRC carrier",
-  );
-  assert.equal(
-    rebuiltState.timings.length,
-    rebuildSource.timings.length * 3,
-    "protocol rebuild did not add SIRC's required frames",
-  );
-  assert.deepEqual(
-    rebuiltState.roles,
-    ["intro", "repeat", "repeat"],
-    "protocol rebuild did not apply the rebuilt frame roles",
-  );
-  assert.equal(
-    rebuiltState.dirty,
-    true,
-    "protocol rebuild did not keep the result as an editable draft",
-  );
-
-  await open("lab-repeats", { width: 1024, height: 900 });
-  assert.equal(
-    await page
-      .getByText(
-        "The signal ends on a mark; review mark/space parity before sending.",
-        { exact: true },
-      )
-      .count(),
-    0,
-    "valid mark-ending signal showed a non-actionable warning",
-  );
-  const labActionBar = page.locator("imprint-signal-lab .action-bar");
-  const liveEmitterLabel = (
-    await labActionBar.locator(".availability strong").textContent()
-  )?.trim();
-  assert(
-    liveEmitterLabel &&
-      !["Emitter ready", "Emitter offline"].includes(liveEmitterLabel),
-    "Signal Lab action bar did not show the selected emitter name",
-  );
-  assert.equal(
-    await labActionBar
-      .locator('.availability > ha-icon[icon="mdi:remote"]')
-      .count(),
-    1,
-    "Signal Lab action bar did not use the approved emitter icon",
-  );
-  assert.equal(
-    await labActionBar
-      .getByRole("button", { name: "Save as new command", exact: true })
-      .count(),
-    1,
-    "Signal Lab action bar shortened the approved save label",
-  );
-  assert.equal(
-    await labActionBar
-      .getByText("Original is protected", { exact: true })
-      .count(),
-    1,
-    "Signal Lab action bar shortened the approved protection label",
-  );
-  assert.equal(
-    await page
-      .getByRole("tab", { name: "Timings", exact: true })
-      .getAttribute("aria-selected"),
-    "true",
-    "approved Timings workbench was not the default Signal Lab view",
-  );
-  assert.equal(
-    await page.getByRole("tab", { name: "Decoded", exact: true }).count(),
-    1,
-    "Decoded workbench tab missing",
-  );
-  assert.equal(
-    await page.getByRole("tab", { name: "Encoded code", exact: true }).count(),
-    1,
-    "Encoded code workbench tab missing",
-  );
-  await page.getByRole("tab", { name: "Decoded", exact: true }).click();
-  assert.equal(
-    (
-      await page
-        .getByLabel("Binary payload in transmission order")
-        .textContent()
-    )?.trim(),
-    "00001000 11110111 00000100 11111011",
-    "Decoded workbench did not expose the recognized transmission-order bits",
-  );
-  assert.equal(
-    await page
-      .getByText("100% support · 4/4 decoders agree", { exact: true })
-      .count(),
-    1,
-    "Auto did not report exact agreement from every applicable decoder",
-  );
-  assert.match(
-    (await page.locator("imprint-signal-lab .binary-note").textContent()) || "",
-    /least-significant bit first/i,
-    "binary payload did not disclose bit order",
-  );
-  assert.equal(
-    await page.getByRole("button", { name: "Copy bits", exact: true }).count(),
-    1,
-    "raw bitstream was not copyable",
-  );
-  await page
-    .locator("imprint-signal-lab label.field", { hasText: "Bitstream decoder" })
-    .locator("select")
-    .selectOption("pulse_width");
-  assert.equal(
-    await page.getByLabel("Binary payload in transmission order").count(),
-    0,
-    "a rejected manual decoder fabricated a bitstream",
-  );
-  assert.match(
-    (await page.locator("imprint-signal-lab .notice.warning").textContent()) ||
-      "",
-    /requires two mark-duration classes/i,
-    "manual decoder rejection was not explained",
-  );
-  await page
-    .locator("imprint-signal-lab label.field", { hasText: "Bitstream decoder" })
-    .locator("select")
-    .selectOption("protocol");
-  assert.equal(
-    (
-      await page
-        .getByLabel("Binary payload in transmission order")
-        .textContent()
-    )?.trim(),
-    "00001000 11110111 00000100 11111011",
-    "named protocol decoding disagreed with the accepted Auto bitstream",
-  );
-  await page
-    .locator("imprint-signal-lab label.field", { hasText: "Bitstream decoder" })
-    .locator("select")
-    .selectOption("auto");
-  assert.equal(
-    await page
-      .getByText("Protocol interpretations (3)", { exact: true })
-      .count(),
-    1,
-    "protocol semantics were not collapsed",
-  );
-  assert.equal(
-    await page
-      .locator("imprint-signal-lab details.alternatives")
-      .getAttribute("open"),
-    null,
-    "alternate protocol semantics opened by default",
-  );
-  await page.getByText("Protocol interpretations (3)", { exact: true }).click();
-  assert.match(
-    (await page
-      .locator("imprint-signal-lab .candidate-facts")
-      .first()
-      .textContent()) || "",
-    /0x0C/,
-    "single-digit decoded hex was not padded to a complete byte",
-  );
-  await page.getByRole("tab", { name: "Encoded code", exact: true }).click();
-  const encodedCode = page.getByLabel("Pronto Hex code", { exact: true });
-  await encodedCode.waitFor();
-  assert.match(
-    await encodedCode.inputValue(),
-    /^0000 006D /,
-    "Encoded code tab did not render the selected representation inline",
-  );
-  assert.equal(
-    await page
-      .getByRole("button", { name: "Copy code", exact: true })
-      .isEnabled(),
-    true,
-    "visible encoded code could not be copied",
-  );
-  assert.equal(
-    await page
-      .getByRole("button", { name: "Inspect encoded code", exact: true })
-      .count(),
-    0,
-    "legacy conversion launcher remained in the Encoded code tab",
-  );
-  await page
-    .locator("imprint-signal-lab .code-toolbar select")
-    .selectOption("girr");
-  const girrCode = page.getByLabel("GIRR 1.2 code", { exact: true });
-  await girrCode.waitFor();
-  assert.match(
-    await girrCode.inputValue(),
-    /^<girr:remote /,
-    "changing representation did not refresh the visible encoded code",
-  );
-  await page.getByRole("tab", { name: "Timings", exact: true }).click();
-  assert.equal(
-    await page.getByText("Save experiment", { exact: true }).count(),
-    0,
-    "legacy page-level save panel remained visible",
-  );
-  assert.equal(
-    await page.getByText("Live validation", { exact: true }).count(),
-    0,
-    "legacy page-level validation panel remained visible",
-  );
-  await labActionBar
-    .getByRole("button", { name: "Save as new command", exact: true })
-    .click();
-  const saveDialog = page.getByRole("dialog", { name: "Save as new command" });
-  await saveDialog.waitFor();
-  assert.equal(
-    await page
-      .locator("imprint-signal-lab .save-dialog")
-      .getByLabel("Name", { exact: true })
-      .count(),
-    1,
-    "focused save dialog did not expose the command name",
-  );
-  await saveDialog.getByRole("button", { name: "Close" }).click();
-  const labelBoxes = await page
-    .locator("imprint-signal-waveform .frame span")
-    .evaluateAll((elements) =>
-      elements.map((element) => {
-        const rect = element.parentElement.getBoundingClientRect();
-        return { x: rect.x, right: rect.right, y: rect.y, bottom: rect.bottom };
-      }),
-    );
-  for (let index = 1; index < labelBoxes.length; index++) {
-    assert(
-      labelBoxes[index - 1].right <= labelBoxes[index].x ||
-        labelBoxes[index - 1].bottom <= labelBoxes[index].y,
-      "frame annotations overlap",
+    `${label} did not receive focus when opened`,
+  );
+  for (let index = 0; index < tabs; index += 1) {
+    await page.keyboard.press("Tab");
+    assert.equal(
+      await dialog.evaluate((element) => element.matches(":focus-within")),
+      true,
+      `${label} allowed focus to escape after ${index + 1} Tab presses`,
     );
   }
-  const wave = page.locator('imprint-signal-waveform svg[data-track="draft"]');
-  const renderedWave = await wave.evaluate((svg) => {
-    const path = svg.querySelector("path.wave");
-    if (!path) return { namespace: "", width: 0, height: 0 };
-    const box = path.getBBox();
+};
+
+const assertVisibleIconOnlyControls = async (scope, label) => {
+  const controls = scope.locator("ha-icon-button:visible");
+  const count = await controls.count();
+  assert.ok(count > 0, `${label} exposed no visible icon-only controls`);
+  for (let index = 0; index < count; index += 1) {
+    const control = controls.nth(index);
+    const box = await control.boundingBox();
+    assert.ok(
+      box && box.width >= 44 && box.height >= 44,
+      `${label} icon-only control ${index + 1} measured ${box?.width ?? 0}x${box?.height ?? 0}px`,
+    );
+    const button = control.getByRole("button");
+    assert.equal(
+      await button.count(),
+      1,
+      `${label} icon-only control ${index + 1} did not expose button semantics`,
+    );
+    assert.ok(
+      (await button.getAttribute("aria-label"))?.trim(),
+      `${label} icon-only control ${index + 1} had no accessible name`,
+    );
+  }
+};
+
+const infraredIoCounts = async () =>
+  page.evaluate(() => {
+    const calls = window.__IMPRINT_REFINERY_FIXTURES__.calls;
+    const count = (name) => calls.filter((call) => (call.action || call.service) === name).length;
     return {
-      namespace: path.namespaceURI,
-      width: box.width,
-      height: box.height,
+      sendSignal: count("send_signal"),
+      captureSignal: count("capture_signal"),
     };
   });
+
+try {
+  await open("library");
   assert.equal(
-    renderedWave.namespace,
-    "http://www.w3.org/2000/svg",
-    "editable waveform path was not created in the SVG namespace",
-  );
-  assert(
-    renderedWave.width > 0 && renderedWave.height > 0,
-    "editable waveform path did not render visibly",
-  );
-  const beforeGutter = page.locator(
-    'imprint-signal-waveform .track.draft > [data-signal-gutter="before"]',
-  );
-  const afterGutter = page.locator(
-    'imprint-signal-waveform .track.draft > [data-signal-gutter="after"]',
-  );
-  await beforeGutter.getByText("Before signal", { exact: true }).waitFor();
-  await afterGutter.getByText("After signal", { exact: true }).waitFor();
-  const [beforeBox, plotBox, afterBox] = await Promise.all([
-    beforeGutter.boundingBox(),
-    wave.boundingBox(),
-    afterGutter.boundingBox(),
-  ]);
-  assert(
-    beforeBox && plotBox && afterBox,
-    "signal boundary gutters did not render",
-  );
-  assert(
-    Math.abs(beforeBox.x + beforeBox.width - plotBox.x) <= 2,
-    "pre-signal gutter did not meet the 0 µs edge",
-  );
-  assert(
-    Math.abs(plotBox.x + plotBox.width - afterBox.x) <= 2,
-    "post-signal gutter did not meet the signal end",
-  );
-  const startEdge = page.locator(
-    'imprint-signal-waveform .track.draft [data-signal-edge="start"]',
-  );
-  assert(await startEdge.count(), "0 µs rising edge was not drawn");
-  const startEdgeHeight = await startEdge.evaluate(
-    (edge) => edge.getBBox().height,
-  );
-  assert(startEdgeHeight > 0, "0 µs rising edge was not visible");
-  assert.equal(
-    await page.locator("imprint-signal-waveform .y-axis .mark").count(),
-    1,
-    "Mark axis label missing",
-  );
-  assert.equal(
-    await page.locator("imprint-signal-waveform .y-axis .space").count(),
-    1,
-    "Space axis label missing",
-  );
-  assert(
-    (await page.locator("imprint-signal-waveform .ruler-tick").count()) >= 3,
-    "elapsed-time axis did not render useful tick labels",
-  );
-  await wave.scrollIntoViewIfNeeded();
-  const waveBox = await wave.boundingBox();
-  assert(waveBox, "waveform bounds unavailable for hover acceptance");
-  await wave.hover({
-    position: { x: waveBox.width * 0.2, y: waveBox.height * 0.55 },
-  });
-  const hoverProbe = page.locator("imprint-signal-waveform [data-hover-probe]");
-  await hoverProbe.waitFor();
-  assert.match(
-    (await hoverProbe.textContent()) || "",
-    /(?:µs|ms)\s*·\s*(?:mark|space)/,
-    "waveform hover probe did not expose duration and signal level",
-  );
-  assert.equal(
-    await page.locator("imprint-signal-waveform .minimap").count(),
-    0,
-    "minimap duplicated the waveform at Fit/1×",
-  );
-  const beforeSpan = Number(await wave.getAttribute("data-view-span"));
-  await page.getByRole("button", { name: "Zoom in" }).click();
-  const afterSpan = Number(await wave.getAttribute("data-view-span"));
-  assert(
-    afterSpan < beforeSpan,
-    "zoom did not change the waveform time window",
-  );
-  assert.equal(
-    await page
-      .locator('imprint-signal-waveform .minimap [data-signal-gutter="before"]')
-      .count(),
-    1,
-    "zoomed minimap pre-signal gutter missing",
-  );
-  assert.equal(
-    await page
-      .locator('imprint-signal-waveform .minimap [data-signal-gutter="after"]')
-      .count(),
-    1,
-    "zoomed minimap post-signal gutter missing",
-  );
-  await page.getByRole("button", { name: /Fit ·/ }).click();
-  assert.equal(
-    Number(await wave.getAttribute("data-view-span")),
-    beforeSpan,
-    "Fit did not restore the complete signal",
-  );
-  assert.equal(
-    await beforeGutter.count(),
-    1,
-    "Fit did not restore the pre-signal gutter",
-  );
-  assert.equal(
-    await afterGutter.count(),
-    1,
-    "Fit did not restore the post-signal gutter",
-  );
-  assert.equal(
-    await page.locator("imprint-signal-waveform .minimap").count(),
-    0,
-    "Fit did not hide the redundant minimap",
-  );
-  await page.getByRole("button", { name: "Preview optimization" }).click();
-  await page
-    .getByRole("dialog")
-    .getByText("Optimize for one press", { exact: true })
-    .waitFor();
-  await page.getByRole("button", { name: "Apply to experiment" }).click();
-  await page.getByRole("button", { name: "Reset", exact: true }).waitFor();
-  assert.equal(
-    await page.getByRole("button", { name: "Reset", exact: true }).isEnabled(),
+    await page.evaluate(() => Boolean(customElements.get("imprint-refinery-panel"))),
     true,
-    "applied optimization did not mark the experiment as editable",
+  );
+  assert.deepEqual(
+    await page.evaluate(() => [...customElements.get("imprint-refinery-card")
+      ? ["imprint-refinery-card", "imprint-refinery-panel", "imprint-signal-lab", "imprint-signal-waveform", "imprint-waveform-comparison"]
+      : []].filter((tag) => Boolean(customElements.get(tag)))),
+    ["imprint-refinery-card", "imprint-refinery-panel", "imprint-signal-lab", "imprint-signal-waveform", "imprint-waveform-comparison"],
+    "The frontend should register only its five public element boundaries",
   );
   assert.equal(
-    await page.getByText("Optimize for one press", { exact: true }).count(),
-    0,
-    "non-actionable one-press optimization remained visible",
+    await page.locator("imprint-refinery-card").evaluate((card) => card.presentation),
+    "panel",
   );
-  await assertNoHorizontalOverflow("Signal Lab repeat workflow");
-
-  await open("lab-invalid", { width: 1024, height: 900 });
+  assert.equal(await page.locator("imprint-refinery-card").locator("ha-card").count(), 0);
   assert.equal(
-    await page.getByText("Optimize for one press", { exact: true }).count(),
-    0,
-    "Signal Lab rendered a dead optimization card without a safe candidate",
+    await page.evaluate(() =>
+      (window.customCards || []).filter(
+        (card) => card.type === "imprint-refinery-card",
+      ).length,
+    ),
+    1,
+    "Imprint Refinery should register one custom card entry",
+  );
+  const hassUpdate = await page.locator("imprint-refinery-card").evaluate(async (card) => {
+    await card.updateComplete;
+    const current = card.hass;
+    const originalPerformUpdate = card.performUpdate;
+    let renders = 0;
+    card.performUpdate = function (...args) {
+      renders += 1;
+      return originalPerformUpdate.apply(this, args);
+    };
+    const replacement = { ...current };
+    card.hass = replacement;
+    await Promise.resolve();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    card.performUpdate = originalPerformUpdate;
+    return {
+      renders,
+      serviceUpdated: card.services?.hass === replacement,
+    };
+  });
+  assert.equal(hassUpdate.renders, 0, "Routine Home Assistant state updates rerendered the whole card");
+  assert.equal(hassUpdate.serviceUpdated, true, "Service calls did not receive the latest Home Assistant object");
+  await page.getByRole("heading", { name: "Silkycasters RGBW", exact: true }).waitFor();
+  assert.equal(await page.getByText("Used by 2 appliances", { exact: true }).count(), 1);
+  assert.equal(await page.getByText(/Changes here affect 2 appliances/).count(), 1);
+  assert.equal(
+    await page.locator(".profile", { hasText: "Silkycasters RGBW" }).getByRole("button", {
+      name: "Create appliance from this remote profile",
+      exact: true,
+    }).count(),
+    1,
+  );
+  assert.equal(await page.getByText("Active IR emitter", { exact: true }).count(), 0);
+  assert.equal(await page.getByText("Manage emitters", { exact: true }).count(), 0);
+  assert.equal(
+    await page.locator("ha-button", { hasText: "Create custom signal" }).locator("ha-icon").getAttribute("icon"),
+    "mdi:square-wave",
+  );
+  const testEmitterBox = await page.getByLabel("Test with IR emitter", { exact: true }).boundingBox();
+  assert.ok(testEmitterBox && testEmitterBox.width <= 250, "Test emitter selector should remain compact");
+  const firstCommand = page.locator(".profile", { hasText: "Silkycasters RGBW" }).locator(".command").first();
+  const commandLayout = await firstCommand.evaluate((element) => {
+    const icon = element.querySelector(".command-open ha-icon")?.getBoundingClientRect();
+    const name = element.querySelector(".command-open strong")?.getBoundingClientRect();
+    const box = element.getBoundingClientRect();
+    return { height: box.height, iconRight: icon?.right || 0, nameLeft: name?.left || 0 };
+  });
+  assert.ok(commandLayout.height <= 112, "Command cards should remain compact");
+  assert.ok(commandLayout.nameLeft >= commandLayout.iconRight, "Command name should follow its icon");
+  await assertVisibleIconOnlyControls(
+    page.locator("imprint-refinery-card"),
+    "Remote profiles workspace",
   );
 
-  await open("lab-custom", { width: 1024, height: 900 });
+  const sharedProfile = page.locator(".profile", { hasText: "Silkycasters RGBW" });
+  await sharedProfile.getByRole("button", { name: "Actions for Silkycasters RGBW", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Delete profile", exact: true }).click();
+  const blockedDelete = page.getByRole("dialog", { name: "Delete remote profile?" });
+  await blockedDelete.waitFor();
+  assert.equal(await blockedDelete.getByText("Sconce 1", { exact: true }).count(), 1);
+  assert.equal(await blockedDelete.getByText("Sconce 2", { exact: true }).count(), 1);
+  assert.equal(
+    await blockedDelete.getByRole("button", { name: "Delete", exact: true }).isDisabled(),
+    true,
+    "A shared remote profile must not be deletable",
+  );
+  await blockedDelete.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  const powerCard = sharedProfile.locator(".command", { hasText: "Power" });
+  await powerCard.getByRole("button", { name: "Actions for Power", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Choose icon", exact: true }).click();
+  const iconDialog = page.getByRole("dialog", { name: "Choose icon" });
+  await iconDialog.waitFor();
+  assert.equal(await iconDialog.getByText("Custom icon", { exact: true }).count(), 1);
+  const useDefault = iconDialog.getByRole("button", { name: "Use default", exact: true });
+  assert.equal(await useDefault.isEnabled(), true);
+  await useDefault.click();
+  assert.equal(await iconDialog.getByText("Default icon", { exact: true }).count(), 1);
+  assert.equal(await useDefault.isDisabled(), true);
+  await iconDialog.getByLabel("Home Assistant icon", { exact: true }).fill("mdi:flash");
+  await iconDialog.getByRole("button", { name: "Save", exact: true }).click();
+  await iconDialog.waitFor({ state: "hidden" });
+  const iconCall = await page.evaluate(() =>
+    window.__IMPRINT_REFINERY_FIXTURES__.calls.find(
+      (call) => call.action === "update_command" && call.data.icon === "mdi:flash",
+    ),
+  );
+  assert.equal(iconCall.data.command_id, "power");
+
+  await sharedProfile.getByRole("button", { name: "Select", exact: true }).click();
+  await sharedProfile.getByText("0 selected", { exact: true }).waitFor();
+  await sharedProfile.getByRole("checkbox", { name: "Select all", exact: true }).check();
+  await sharedProfile.getByText("4 selected", { exact: true }).waitFor();
+  await sharedProfile.getByRole("checkbox", { name: "Power", exact: true }).uncheck();
+  await sharedProfile.getByRole("checkbox", { name: "Timer: 1h", exact: true }).uncheck();
+  await sharedProfile.getByText("2 selected", { exact: true }).waitFor();
+  await sharedProfile.getByRole("button", { name: "Move to another profile", exact: true }).click();
+  const moveDialog = page.getByRole("dialog", { name: "Move commands" });
+  await moveDialog.waitFor();
+  assert.equal(
+    await moveDialog.getByLabel("Destination remote profile").inputValue(),
+    "television_remote",
+  );
+  assert.equal(await moveDialog.getByText(/keeps its complete revision history/).count(), 1);
+  await moveDialog.getByRole("button", { name: "Move commands", exact: true }).click();
+  await moveDialog.waitFor({ state: "hidden" });
+  assert.equal(await sharedProfile.getByText("Warm white", { exact: true }).count(), 0);
+  const televisionProfile = page.locator(".profile", { hasText: "Example television remote" });
+  assert.equal(await televisionProfile.getByText("Warm white", { exact: true }).count(), 1);
+  assert.equal(await televisionProfile.getByText("Blue", { exact: true }).count(), 1);
+  const movedCommands = await page.evaluate(() => ({
+    calls: window.__IMPRINT_REFINERY_FIXTURES__.calls.filter(
+      (call) => call.action === "move_command",
+    ),
+    warmWhiteRevisions:
+      window.__IMPRINT_REFINERY_FIXTURES__.workspaceRegistry.remote_profiles
+        .television_remote.commands.warm_white.revision_count,
+    blueRevisions:
+      window.__IMPRINT_REFINERY_FIXTURES__.workspaceRegistry.remote_profiles
+        .television_remote.commands.blue.revision_count,
+  }));
+  assert.deepEqual(
+    movedCommands.calls.map((call) => call.data.command_id).sort(),
+    ["blue", "warm_white"],
+  );
+  assert.deepEqual(
+    [movedCommands.warmWhiteRevisions, movedCommands.blueRevisions],
+    [1, 1],
+    "Bulk moves must preserve each command's existing revision history",
+  );
+
+  await page.locator(".profile", { hasText: "Silkycasters RGBW" }).locator(".command-open", { hasText: "Power" }).click();
+  const commandInspector = page.getByRole("complementary", { name: "Command details" });
+  await commandInspector.waitFor();
+  const inspectorFacts = commandInspector.locator("dl.imprint-fact-grid").first();
+  assert.ok(await inspectorFacts.locator("dt").count() > 0, "Inspector facts should use semantic terms");
+  assert.equal(
+    await inspectorFacts.locator("dt").count(),
+    await inspectorFacts.locator("dd").count(),
+    "Inspector fact labels and values should remain paired",
+  );
+  assert.equal(await commandInspector.getByText("Ready-to-use Home Assistant action", { exact: true }).count(), 1);
+  assert.equal(await commandInspector.getByRole("button", { name: "Copy action", exact: true }).count(), 1);
+  const inspectorTabs = commandInspector.getByRole("tab");
+  await inspectorTabs.first().focus();
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(20);
+  assert.equal(await inspectorTabs.nth(1).getAttribute("aria-selected"), "true");
+  assert.equal(await inspectorTabs.nth(1).evaluate((element) => element.matches(":focus-within")), true);
+  await page.keyboard.press("End");
+  assert.equal(await inspectorTabs.last().getAttribute("aria-selected"), "true");
+  assert.equal(
+    await inspectorTabs.last().evaluate((element) => element.matches(":focus-within")),
+    true,
+  );
+  await page.keyboard.press("Home");
+  assert.equal(await inspectorTabs.first().getAttribute("aria-selected"), "true");
+  const editCommandButton = commandInspector.getByRole("button", { name: "Edit", exact: true });
+  await editCommandButton.click();
+  let commandEdit = page.getByRole("dialog", { name: "Edit command" });
+  await commandEdit.waitFor();
+  await assertFocusContained(commandEdit, "Edit command dialog");
+  await page.keyboard.press("Escape");
+  await commandEdit.waitFor({ state: "hidden" });
+  assert.equal(
+    await editCommandButton.evaluate((element) => element.matches(":focus")),
+    true,
+    "Edit command dialog did not restore focus to its opener",
+  );
+  await editCommandButton.click();
+  commandEdit = page.getByRole("dialog", { name: "Edit command" });
+  await commandEdit.waitFor();
+  const editCommandWorkflow = page.locator('[data-workflow="edit-command"]');
+  assert.equal(await editCommandWorkflow.getByRole("note").count(), 1);
+  assert.equal(await editCommandWorkflow.getByRole("alert").count(), 0);
+  assert.equal(await editCommandWorkflow.getByLabel("Command name").inputValue(), "Power");
+  assert.equal(await editCommandWorkflow.getByLabel("Remote profile").inputValue(), "silkycasters_rgbw");
+  assert.equal(await editCommandWorkflow.getByText(/shared.*affects every appliance/i).count(), 1);
+  await editCommandWorkflow.evaluate((dialog) => {
+    window.__IMPRINT_REFINERY_FIXTURES__.generalDialogClosed = 0;
+    dialog.addEventListener(
+      "closed",
+      () => {
+        window.__IMPRINT_REFINERY_FIXTURES__.generalDialogClosed += 1;
+      },
+      { once: true },
+    );
+  });
+  await editCommandWorkflow.getByRole("button", { name: "Cancel", exact: true }).click();
+  await commandEdit.waitFor({ state: "hidden" });
+  assert.equal(
+    await page.evaluate(
+      () => window.__IMPRINT_REFINERY_FIXTURES__.generalDialogClosed,
+    ),
+    1,
+    "General workflow Cancel bypassed the native ha-dialog closed event",
+  );
+  assert.equal(
+    await editCommandButton.evaluate((element) => element.matches(":focus")),
+    true,
+    "General workflow native Cancel did not restore focus to its opener",
+  );
+
+  await commandInspector.getByRole("button", { name: "Duplicate", exact: true }).click();
+  const duplicateCommand = page.getByRole("dialog", { name: "Duplicate command" });
+  await duplicateCommand.waitFor();
+  await assertFocusContained(duplicateCommand, "Duplicate command dialog");
+  const duplicateWorkflow = page.locator('[data-workflow="duplicate-command"]');
+  assert.equal(await duplicateWorkflow.getByLabel("Command name").inputValue(), "Power");
+  assert.equal(await duplicateWorkflow.getByLabel("Command ID").inputValue(), "power");
+  assert.equal(await duplicateWorkflow.getByLabel("Remote profile").inputValue(), "spare_remote");
+  await duplicateWorkflow.getByLabel("Remote profile").selectOption("television_remote");
+  assert.equal(await duplicateWorkflow.getByLabel("Command ID").inputValue(), "power_copy");
+  await duplicateWorkflow.getByLabel("Command ID").fill("main_power");
+  await duplicateWorkflow.getByRole("button", { name: "Duplicate", exact: true }).click();
+  await duplicateCommand.waitFor({ state: "hidden" });
+  await commandInspector.getByText("Example television remote", { exact: true }).waitFor();
+  const duplicateCall = await page.evaluate(() =>
+    window.__IMPRINT_REFINERY_FIXTURES__.calls.find(
+      (call) => call.action === "duplicate_command",
+    ),
+  );
+  assert.deepEqual(duplicateCall.data, {
+    remote_profile_id: "silkycasters_rgbw",
+    command_id: "power",
+    target_remote_profile_id: "television_remote",
+    target_command_id: "main_power",
+    name: "Power",
+  });
+
+  await commandInspector.getByRole("button", { name: "Open in Signal Lab", exact: true }).click();
+  await page.getByRole("heading", { name: "Signal Lab", exact: true }).waitFor();
+  assert.equal(await page.getByText("Original is protected", { exact: true }).count(), 1);
+  const waveformUpdates = await page.locator("imprint-signal-lab").evaluate(async (lab) => {
+    const waveform = lab.shadowRoot.querySelector("imprint-signal-waveform");
+    await waveform.updateComplete;
+    const originalPerformUpdate = waveform.performUpdate;
+    let updates = 0;
+    waveform.performUpdate = function (...args) {
+      updates += 1;
+      return originalPerformUpdate.apply(this, args);
+    };
+    lab.message = "Unrelated status update";
+    await lab.updateComplete;
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    waveform.performUpdate = originalPerformUpdate;
+    return updates;
+  });
+  assert.equal(waveformUpdates, 0, "An unrelated Signal Lab update rerendered waveform geometry");
+  await page.getByRole("button", { name: "Return to remote profiles", exact: true }).click();
+  await page.getByRole("heading", { name: "Remote profiles", exact: true }).waitFor();
+
+  await page.getByRole("button", { name: "Library", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Backup & restore", exact: true }).click();
+  const backupDialog = page.getByRole("dialog", { name: "Backup & restore" });
+  await backupDialog.waitFor();
+  const backupWorkflow = page.locator('[data-workflow="backup-restore"]');
+  assert.match(await backupWorkflow.getByLabel("Export JSON").inputValue(), /imprint_refinery\.backup/);
+  await backupWorkflow.getByLabel("Backup JSON").fill(JSON.stringify({
+    schema: "imprint_refinery.backup",
+    version: 2,
+    history: "full",
+    command_count: 1,
+    remote_profiles: { imported: { name: "Imported", commands: { power: { name: "Power", code: "+9000 -4500" } } } },
+    appliances: { imported_tv: { name: "Imported TV", remote_profile_id: "imported", area_name: "Living room" } },
+  }));
+  await backupWorkflow.getByRole("button", { name: "Review restore", exact: true }).click();
+  await backupWorkflow.getByText("Imported TV", { exact: true }).waitFor();
+  assert.equal(await backupWorkflow.getByText("Imported TV", { exact: true }).count(), 1);
+  assert.equal(await backupWorkflow.getByLabel("Home Assistant Area").inputValue(), "living-room");
+  assert.equal(await backupWorkflow.getByLabel("IR emitter").inputValue(), "");
+  await backupWorkflow.getByRole("button", { name: "Close", exact: true }).click();
+
+  await page.getByRole("button", { name: "Library", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Import signals", exact: true }).click();
+  const importDialog = page.getByRole("dialog", { name: "Import IR signals" });
+  await importDialog.waitFor();
+  const importWorkflow = page.locator('[data-workflow="import-signals"]');
+  await importWorkflow.getByLabel("Remote profile").selectOption("silkycasters_rgbw");
+  await importWorkflow.locator('input[type="file"]').setInputFiles({
+    name: "living-room.ir",
+    mimeType: "text/plain",
+    buffer: Buffer.from("Filetype: IR signals file\nVersion: 1\n#\nname: Power"),
+  });
+  await importWorkflow.getByText("living-room.ir", { exact: true }).waitFor();
+  assert.equal(await importWorkflow.getByLabel("Format").inputValue(), "auto");
+  await importWorkflow.getByRole("button", { name: "Preview import", exact: true }).click();
+  await importWorkflow.getByText("Imported power", { exact: true }).waitFor();
+  await importWorkflow.getByText("Detected format: flipper", { exact: true }).waitFor();
+  const importPreviewCall = await page.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls.find(
+    (call) => call.action === "inspect_import",
+  ));
+  assert.equal(importPreviewCall.data.format, "auto");
+  assert.equal(await importWorkflow.getByText("Imported power", { exact: true }).count(), 1);
+  assert.equal(await importWorkflow.getByRole("button", { name: "Import commands", exact: true }).isEnabled(), true);
+  await importWorkflow.getByRole("button", { name: "Close", exact: true }).click();
+
+  await page.getByRole("button", { name: "Find codes", exact: true }).click();
+  const catalogDialog = page.getByRole("dialog", { name: "Find remote codes" });
+  await catalogDialog.waitFor();
+  const catalogWorkflow = page.locator('[data-workflow^="catalog-"]');
+  await catalogWorkflow.getByRole("button", { name: /Guided appliance test/ }).click();
+  await catalogWorkflow.getByLabel("Category").fill("tv");
+  await catalogWorkflow.getByLabel("Brand").fill("Vizio");
+  await catalogWorkflow.getByLabel("Test with IR emitter").selectOption("fixture-emitter-one");
+  await catalogWorkflow.getByRole("button", { name: "Start guided matching", exact: true }).click();
+  assert.equal(await catalogWorkflow.getByRole("button", { name: "Worked", exact: true }).isDisabled(), true);
+  await catalogWorkflow.getByRole("button", { name: "Test once", exact: true }).click();
+  assert.equal(await catalogWorkflow.getByRole("button", { name: "Worked", exact: true }).isEnabled(), true);
+  const guidedTestCall = await page.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls.find(
+    (call) => call.action === "catalog_guided_test",
+  ));
+  assert.equal(guidedTestCall.data.infrared_emitter_ref, "fixture-emitter-one");
+  await catalogWorkflow.getByRole("button", { name: "Worked", exact: true }).click();
+  await catalogWorkflow.getByLabel("Matching remote profile").waitFor();
+  await catalogWorkflow.getByRole("button", { name: "Keep testing", exact: true }).click();
+  await catalogWorkflow.getByRole("button", { name: "Cancel guided matching", exact: true }).click();
+  await catalogWorkflow.getByRole("button", { name: "Back", exact: true }).click();
+  await catalogWorkflow.getByLabel("Brand").fill("Vizio");
+  await catalogWorkflow.getByRole("button", { name: "Search catalog", exact: true }).click();
+  await catalogWorkflow.getByRole("button", { name: "Import profile", exact: true }).click();
+  const importedDialog = page.getByRole("dialog", { name: "Remote profile imported" });
+  await importedDialog.waitFor();
+  assert.equal(await catalogWorkflow.getByRole("button", { name: "Create appliance", exact: true }).count(), 1);
+  assert.equal(await catalogWorkflow.getByLabel("Assign to an existing appliance").count(), 1);
+  await catalogWorkflow.getByRole("button", { name: "Create appliance", exact: true }).click();
+  const addApplianceDialog = page.getByRole("dialog", { name: "Add appliance" });
+  await addApplianceDialog.waitFor();
+  const addApplianceWorkflow = page.locator('[data-workflow="appliance"]');
+  assert.equal(await addApplianceWorkflow.getByLabel("Remote profile").inputValue(), "vizio_common_tv_family");
+  await addApplianceWorkflow.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  const testSelect = page.getByLabel("Test with IR emitter", { exact: true });
+  await testSelect.selectOption("fixture-emitter-one");
+  assert.equal(
+    await page.locator("imprint-refinery-card").evaluate((card) => card.testEmitterRef),
+    "fixture-emitter-one",
+    "Temporary test-emitter selection did not reach the workspace controller",
+  );
+  await page.locator(".profile", { hasText: "Silkycasters RGBW" }).getByRole("button", { name: "Test Power", exact: true }).click();
+  await page.getByText(/Sent Power once/).waitFor();
+  assert.equal(
+    await page.getByRole("status").filter({ hasText: /Sent Power once/ }).count(),
+    1,
+    "Successful sends should be announced once as a polite status",
+  );
+  const calls = await page.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls);
+  const send = calls.find((call) => call.action === "send_signal");
+  assert.equal(send.data.infrared_emitter_ref, "fixture-emitter-one");
+
+  await page.locator(".profile", { hasText: "Silkycasters RGBW" }).getByRole("button", { name: "Learn command", exact: true }).click();
+  const learn = page.getByRole("dialog", { name: "Command captured" });
+  await learn.waitFor();
+  const learnWorkflow = page.locator('[data-workflow="learn-command-review"]');
+  assert.equal(
+    await page.locator("imprint-refinery-card").evaluate((card) => card.dialog?.data?.infrared_receiver_ref),
+    "fixture-receiver-one",
+    "Matching IR receiver was not suggested from the temporary emitter",
+  );
+  assert.equal(await learnWorkflow.locator("imprint-signal-waveform").count(), 1);
+  assert.equal(await learnWorkflow.getByText(/Nothing is saved until/).count(), 1);
+  await page.keyboard.press("Escape");
+  await learn.waitFor({ state: "hidden" });
+  await testSelect.selectOption("");
+  await page.locator(".profile", { hasText: "Spare remote" }).getByRole("button", { name: "Learn command", exact: true }).first().click();
+  const ambiguousLearn = page.getByRole("dialog", { name: "Choose an IR receiver" });
+  await ambiguousLearn.waitFor();
+  const ambiguousLearnWorkflow = page.locator('[data-workflow="learn-command-choose"]');
+  assert.equal(await ambiguousLearnWorkflow.getByLabel(/^IR receiver/).inputValue(), "");
+  await ambiguousLearnWorkflow.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  await page.getByRole("tab", { name: "Appliances", exact: true }).click();
+  await page.getByRole("heading", { name: "Appliances", exact: true }).waitFor();
+  assert.equal(await page.getByRole("heading", { name: "Sconce 1", exact: true }).count(), 1);
+  assert.equal(await page.getByRole("heading", { name: "Sconce 2", exact: true }).count(), 1);
+  assert.equal(await page.getByText("Silkycasters RGBW", { exact: true }).count(), 2);
+  assert.equal(await page.getByText("Emitter unavailable", { exact: true }).count(), 1);
+  assert.equal(
+    await page.locator('[data-appliance-id="living_room_sconce_2"]').getByText("Entity available", { exact: true }).count(),
+    0,
+    "Healthy entity status must not compete with the route warning",
+  );
+  assert.equal(
+    await page.locator('[data-appliance-id="living_room_tv"]').getByText("Entity unavailable", { exact: true }).count(),
+    1,
+  );
+  await assertVisibleIconOnlyControls(
+    page.locator('[data-workspace="appliances"]'),
+    "Appliances workspace",
+  );
+  await page.locator(".appliance", { hasText: "Sconce 1" }).getByRole("button", { name: "Edit Sconce 1", exact: true }).click();
+  const applianceDialog = page.getByRole("dialog", { name: "Edit appliance" });
+  await applianceDialog.waitFor();
+  const applianceWorkflow = page.locator('[data-workflow="appliance"]');
+  assert.equal(await applianceWorkflow.getByLabel("Home Assistant Area").inputValue(), "living-room");
+  assert.equal(await applianceWorkflow.getByLabel("Remote profile").inputValue(), "silkycasters_rgbw");
+  assert.equal(await applianceWorkflow.getByLabel("Preferred IR emitter").inputValue(), "fixture-emitter-one");
+  await applianceWorkflow.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  const routeIoBefore = await infraredIoCounts();
+  await page.evaluate(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", "appliances");
+    url.searchParams.set("appliance", "living_room_sconce_2");
+    window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  const selectedAppliance = page.locator('[data-appliance-id="living_room_sconce_2"]');
+  await selectedAppliance.waitFor();
+  assert.equal(await selectedAppliance.evaluate((element) => element.matches(":focus")), true);
+  assert.deepEqual(
+    await infraredIoCounts(),
+    routeIoBefore,
+    "Restoring an appliance deep link restarted infrared capture or transmission",
+  );
+  const sconceOne = page.locator(".appliance", { hasText: "Sconce 1" });
+  await sconceOne.getByRole("button", { name: "Actions for Sconce 1", exact: true }).click();
+  await sconceOne.getByText("Open remote profile", { exact: true }).click();
+  const selectedProfile = page.locator('article[data-profile-id="silkycasters_rgbw"]');
+  await selectedProfile.waitFor();
+  assert.equal(await selectedProfile.evaluate((element) => element.matches(":focus")), true);
+  assert.match(page.url(), /view=remote_profiles/);
+  assert.match(page.url(), /profile=silkycasters_rgbw/);
+
+  await page.getByRole("tab", { name: "Infrared hardware", exact: true }).click();
+  await page.getByRole("heading", { name: "Infrared hardware", exact: true }).waitFor();
+  assert.equal(await page.getByText("IR emitters", { exact: true }).count(), 1);
+  assert.equal(await page.getByText("IR receivers", { exact: true }).count(), 1);
+  assert.equal(await page.getByText("Living room IR", { exact: true }).count(), 1);
+  assert.equal(await page.getByText("Living room receiver", { exact: true }).count(), 1);
+  assert.equal(await page.getByText("Bedroom receiver", { exact: true }).count(), 1);
+  assert.equal(await page.getByRole("link", { name: /Open .* entity/ }).count(), 4);
+  assert.equal(await page.getByText("Last activity", { exact: true }).count(), 4);
+  assert.equal(
+    await page.locator('[data-hardware-ref="fixture-emitter-one"] time').getAttribute("datetime"),
+    "2000-01-01T00:00:00Z",
+  );
+  assert.equal(await page.locator(".hardware-row-primary").count(), 4);
+  assert.equal(await page.getByRole("button", { name: /^Actions for / }).count(), 4);
+  assert.equal(await page.getByRole("link", { name: "Add compatibility adapter", exact: true }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: /Delete/ }).count(), 0);
+
+  await page.evaluate(() => import("/custom_components/imprint_refinery/www/imprint-refinery-card.js?duplicate-load-smoke"));
+  assert.equal(
+    await page.evaluate(() =>
+      (window.customCards || []).filter(
+        (card) => card.type === "imprint-refinery-card",
+      ).length,
+    ),
+    1,
+    "Duplicate bundle loads should not duplicate the custom card registry entry",
+  );
+  assert.equal(errors.length, 0, `Browser errors: ${errors.join("\n")}`);
+  await noOverflow("desktop workspace");
+
+  await open("library", 900, 900, { presentation: "card" });
+  const cardShell = page.locator("imprint-refinery-card");
+  assert.equal(await cardShell.evaluate((card) => card.presentation), "card");
+  assert.equal(await cardShell.locator("ha-card").count(), 1);
+  assert.equal(await cardShell.locator(".compact-card").count(), 1);
+  assert.equal(await cardShell.locator(".workspace-header").count(), 0);
+  assert.equal(await cardShell.locator(".compact-command-row").count() > 0, true);
+  assert.equal(await cardShell.locator(".compact-command-row").count() <= 12, true);
+  await cardShell.getByRole("button", { name: "Send Power to Sconce 1", exact: true }).click();
+  const compactSend = await page.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls.find(
+    (call) => call.transport === "service" && call.domain === "remote" && call.service === "send_command",
+  ));
+  assert.deepEqual(compactSend?.data, {
+    entity_id: "remote.sconce_1",
+    command: "power",
+    num_repeats: 1,
+    delay_secs: 0.4,
+  });
+  assert.equal(
+    await page.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls.some(
+      (call) => call.transport === "ws" && call.action === "send_signal",
+    )),
+    false,
+  );
+  assert.equal(
+    await cardShell.evaluate((card) => getComputedStyle(card.shadowRoot.querySelector(".compact-card")).minHeight),
+    "0px",
+    "Lovelace card mode should remain content-height rather than viewport-height",
+  );
+
+  await open("library", 900, 900, { optionalPicker: true });
+  const pickerCard = page.locator(".profile", { hasText: "Silkycasters RGBW" }).locator(".command", { hasText: "Power" });
+  await pickerCard.getByRole("button", { name: "Actions for Power", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Choose icon", exact: true }).click();
+  const pickerDialog = page.getByRole("dialog", { name: "Choose icon" });
+  const iconPicker = pickerDialog.locator("ha-icon-picker");
+  await iconPicker.getByRole("button", { name: "Home Assistant icon", exact: true }).click();
+  assert.equal(await iconPicker.evaluate((element) => element.open), true);
+  await page.keyboard.press("Escape");
+  assert.equal(await iconPicker.evaluate((element) => element.open), false);
+  assert.equal(await pickerDialog.isVisible(), true, "Closing a nested picker dismissed its workflow");
+  await page.keyboard.press("Escape");
+  await pickerDialog.waitFor({ state: "hidden" });
+
+  await open("library", 1100, 900);
+  await page.locator(".profile", { hasText: "Silkycasters RGBW" }).locator(".command-open", { hasText: "Power" }).click();
+  const narrowInspector = page.getByLabel("Command details", { exact: true });
+  await narrowInspector.waitFor();
+  await narrowInspector.getByRole("tab", { name: "History", exact: true }).click();
+  await narrowInspector.getByRole("button", { name: "Revision 3", exact: true }).click();
+  const revisionLabel = narrowInspector.getByLabel("Revision label", { exact: true });
+  await revisionLabel.fill("Reviewed timing");
+  await narrowInspector.getByRole("button", { name: "Save label", exact: true }).click();
+  const labelCall = await page.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls.find(
+    (call) => call.action === "label_revision",
+  ));
+  assert.deepEqual(labelCall.data, {
+    remote_profile_id: "silkycasters_rgbw",
+    command_id: "power",
+    revision_id: 3,
+    label: "Reviewed timing",
+  });
+  await narrowInspector.getByRole("button", { name: "Compare", exact: true }).click();
+  const revisionComparison = page.getByRole("dialog", { name: "Revision 3 compared with current", exact: true });
+  await revisionComparison.waitFor();
+  await revisionComparison.getByRole("button", { name: "Close", exact: true }).last().click();
+  await revisionComparison.waitFor({ state: "hidden" });
+  const revisionDownload = page.waitForEvent("download");
+  await narrowInspector.getByRole("button", { name: "Export JSON", exact: true }).click();
+  assert.match((await revisionDownload).suggestedFilename(), /revision-3\.json$/);
+  await narrowInspector.getByRole("tab", { name: "Code", exact: true }).click();
+  const codeDownload = page.waitForEvent("download");
+  await narrowInspector.getByRole("button", { name: "Download", exact: true }).click();
+  assert.match((await codeDownload).suggestedFilename(), /\.txt$/);
+  await narrowInspector.getByRole("tab", { name: "Overview", exact: true }).click();
+  assert.equal(await narrowInspector.getByRole("button", { name: "Copy entity ID", exact: true }).count(), 1);
+  assert.equal(
+    await narrowInspector.evaluate((element) => element.scrollWidth <= element.clientWidth),
+    true,
+    "Narrow command inspector overflowed horizontally",
+  );
+  await noOverflow("narrow command inspector");
+
+  await open("library", 760, 900);
+  await noOverflow("760px workspace");
+
+  await open("library", 1440, 1000, { hostWidth: 390 });
+  await noHostOverflow("390px embedded workspace");
+  await page.locator(".profile", { hasText: "Silkycasters RGBW" }).locator(".command-open", { hasText: "Power" }).click();
+  const embeddedInspector = page.getByRole("dialog", { name: "Power", exact: true });
+  await embeddedInspector.waitFor();
+  await assertFocusContained(embeddedInspector, "Embedded command inspector");
+  await noHostOverflow("390px embedded command inspector");
+  await page.keyboard.press("Escape");
+  await embeddedInspector.waitFor({ state: "hidden" });
+
+  await open("library", 1440, 1000, { hostWidth: 320, textScale: 2 });
+  await noHostOverflow("320px embedded workspace at 200% text");
+  await noOverflow("320px embedded workspace at 200% text");
+
+  await open("library", 390, 844, { textScale: 2 });
+  await page.locator(".profile", { hasText: "Silkycasters RGBW" }).locator(".command-open", { hasText: "Power" }).click();
+  const scaledInspector = page.getByRole("dialog", { name: "Power", exact: true });
+  await scaledInspector.waitFor();
+  const scaledInspectorLayout = await page.locator("aside[data-command-inspector]").evaluate((aside) => {
+    const buttons = [...aside.querySelectorAll(".inspector-actions ha-button")].map((button) => {
+      const rect = button.getBoundingClientRect();
+      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+    });
+    const overlaps = buttons.some((first, index) => buttons.slice(index + 1).some((second) =>
+      first.left < second.right && first.right > second.left && first.top < second.bottom && first.bottom > second.top
+    ));
+    return {
+      contained: buttons.every(({ left, right }) => left >= 0 && right <= window.innerWidth),
+      overlaps,
+      overflowed: aside.scrollWidth > aside.clientWidth + 1,
+    };
+  });
+  assert.deepEqual(scaledInspectorLayout, { contained: true, overlaps: false, overflowed: false });
+  await noOverflow("390px command inspector at 200% text");
+  await scaledInspector.getByRole("button", { name: "Close", exact: true }).click();
+  await scaledInspector.waitFor({ state: "hidden" });
+
+  await open("library", 390, 844);
+  await noOverflow("mobile workspace");
+  await assertVisibleIconOnlyControls(
+    page.locator("imprint-refinery-card"),
+    "Mobile remote profiles workspace",
+  );
+  await page.locator("imprint-refinery-card").evaluate(async (card) => {
+    const registry = structuredClone(card.registry);
+    registry.remote_profiles.silkycasters_rgbw.name = "Living room decorative wall-light controller with an intentionally long translated-style profile name";
+    registry.appliances.living_room_sconce_1.name = "North alcove decorative wall light with an intentionally long translated-style appliance name";
+    card.registry = registry;
+    await card.updateComplete;
+  });
+  await noOverflow("mobile workspace with long names");
+  await page.getByRole("tab", { name: "Appliances", exact: true }).click();
+  await noOverflow("mobile appliances");
+  await assertVisibleIconOnlyControls(
+    page.locator('[data-workspace="appliances"]'),
+    "Mobile appliances workspace",
+  );
+
+  const signalLabSaveHost = await openSignalLab("lab", 760, 900);
   await page
     .getByRole("button", { name: "Save as new command", exact: true })
     .click();
-  const customSaveDialog = page.getByRole("dialog", {
-    name: "Save as new command",
+  const signalSaveDialog = page.locator('[data-workflow="signal-save"]');
+  await signalSaveDialog.waitFor();
+  await assertFocusContained(signalSaveDialog, "Signal save dialog");
+  await signalLabSaveHost.evaluate(async (element) => {
+    element.busy = true;
+    await element.updateComplete;
   });
-  await customSaveDialog.waitFor();
-  const customSaveSurface = page.locator("imprint-signal-lab .save-dialog");
-  const customSaveName = customSaveSurface.getByLabel("Name", { exact: true });
-  assert.equal(
-    await customSaveName.inputValue(),
-    "",
-    "Custom Signal Lab inserted prompt copy as a command name",
-  );
-  assert.equal(
-    await customSaveName.getAttribute("placeholder"),
-    "e.g. Reading light",
-    "Custom Signal Lab did not expose a real name placeholder",
-  );
-  assert.equal(
-    await customSaveSurface
-      .locator('input[placeholder="reading_light"]')
-      .inputValue(),
-    "",
-    "Custom Signal Lab inserted a fake command ID",
-  );
-  await customSaveDialog.getByRole("button", { name: "Close" }).click();
-
-  await open("lab-inferred-binary", { width: 1024, height: 900 });
-  assert.equal(
-    (
-      await page
-        .getByLabel("Binary payload in transmission order")
-        .textContent()
-    )?.trim(),
-    "01011010",
-    "structurally inferred binary payload was not shown",
-  );
-  assert.equal(
-    await page
-      .getByText("70% support · one applicable decoder", { exact: true })
-      .count(),
-    1,
-    "single-decoder binary inference did not carry a lower support score",
-  );
-  assert.match(
-    (await page.locator("imprint-signal-lab .binary-note").textContent()) || "",
-    /protocol, bit order, and field meanings are unknown/i,
-    "structural binary inference did not disclose its semantic limits",
-  );
-
-  await open("inspector-code", { width: 1024, height: 900 });
-  await page.getByText("Raw bitstream", { exact: true }).waitFor();
-  assert.equal(
-    await page
-      .getByText("Protocol interpretations (3)", { exact: true })
-      .count(),
-    1,
-    "Inspector did not collapse protocol semantics",
-  );
-  assert.equal(
-    await page
-      .locator("imprint-command-inspector details.alternatives")
-      .getAttribute("open"),
-    null,
-    "Inspector opened alternate decoder semantics by default",
-  );
-  assert.equal(
-    await page.getByText(/bits 32 · 0x20/i).count(),
-    0,
-    "Inspector formatted frame length as decoded data",
-  );
-
-  await open("lab-code", { width: 1024, height: 900 });
-  const paddedPronto = page.getByLabel("Pronto Hex code", { exact: true });
-  await paddedPronto.waitFor();
-  assert.match(
-    await paddedPronto.inputValue(),
-    /^0000 006D /,
-    "open-ended capture did not render a padded Pronto representation",
-  );
-  assert.equal(
-    await page.getByText("Trailing idle encoded", { exact: true }).count(),
-    1,
-    "Pronto padding was not disclosed beside the visible code",
-  );
-  assert.match(
-    (await page
-      .locator("imprint-signal-lab .code-surface .notice")
-      .textContent()) || "",
-    /saved capture remains unchanged/i,
-    "Pronto padding disclosure did not protect the measured source",
-  );
-  await assertNoHorizontalOverflow("open-ended Pronto code viewer");
-
-  await open("catalog-import-preview", { width: 1024, height: 900 });
-  assert.match(
-    (await page.getByLabel("Remote data").getAttribute("placeholder")) || "",
-    /Paste Pronto/,
-    "Import prompt was not a real textarea placeholder",
-  );
-
-  await open("lab-repeats", { width: 390, height: 844 });
-  const mobileLabBar = page.locator("imprint-signal-lab .action-bar");
-  assert.equal(
-    await mobileLabBar.evaluate(
-      (element) => getComputedStyle(element).position,
-    ),
-    "sticky",
-    "Signal Lab actions were not sticky on phones",
-  );
-  await page.evaluate(() => window.scrollTo(0, 700));
-  await page.waitForTimeout(50);
-  const mobileLabBarBox = await mobileLabBar.boundingBox();
-  assert(
-    mobileLabBarBox && mobileLabBarBox.y <= 1,
-    `Signal Lab actions scrolled out of reach: ${JSON.stringify(mobileLabBarBox)}`,
-  );
-  assert.equal(
-    await mobileLabBar
-      .getByRole("button", { name: "Test once", exact: true })
-      .isVisible(),
-    true,
-  );
-  assert.equal(
-    await mobileLabBar
-      .getByRole("button", { name: "Save as new command", exact: true })
-      .isVisible(),
-    true,
-  );
-  assert.equal(
-    await page
-      .getByRole("button", { name: "Previous timing", exact: true })
-      .getAttribute("title"),
-    "Previous timing",
-  );
-  assert.equal(
-    await page
-      .getByRole("button", { name: "Next timing", exact: true })
-      .getAttribute("title"),
-    "Next timing",
-  );
-
-  await open("library", { width: 720, height: 900 });
-  await assertNoHorizontalOverflow("Library at 200% desktop-equivalent zoom");
-
-  for (const view of [
-    "empty",
-    "offline",
-    "no-blaster",
-    "load-error",
-    "learn-error",
-    "inspector-malformed",
-    "lab-invalid",
-    "catalog-error",
-  ]) {
-    await open(view, { width: 390, height: 844 });
-    await assertNoHorizontalOverflow(`${view} mobile`);
-  }
-  await open("load-error", { width: 390, height: 844 });
-  const dismissError = page.getByRole("button", {
-    name: "Dismiss error notification",
-    exact: true,
-  });
-  await dismissError.waitFor();
-  const dismissBox = await dismissError.boundingBox();
-  assert(
-    dismissBox && dismissBox.width >= 44 && dismissBox.height >= 44,
-    `Error dismissal touch target was too small: ${JSON.stringify(dismissBox)}`,
-  );
-  await dismissError.click();
-  assert.equal(
-    await dismissError.count(),
-    0,
-    "Persistent global error could not be dismissed",
-  );
-  for (const view of [
-    "library",
-    "learn-review",
-    "inspector-signal",
-    "inspector-single-frame",
-    "lab-repeats",
-    "catalog-import-preview",
-    "guided",
-  ]) {
-    await open(view, { width: 390, height: 844 });
-    await assertNoHorizontalOverflow(`${view} mobile`);
-  }
-  await open("library", { width: 390, height: 844 });
-  const rememberedScroll = await page.evaluate(() => {
-    window.scrollTo(
-      0,
-      Math.min(420, document.documentElement.scrollHeight - innerHeight),
-    );
-    return window.scrollY;
-  });
-  assert(
-    rememberedScroll > 0,
-    "Mobile Library fixture was not tall enough to test scroll restoration",
-  );
-  await page.reload({ waitUntil: "networkidle" });
-  await page.waitForFunction(
-    () => document.documentElement.dataset.fixtureReady === "true",
-  );
-  await page.waitForFunction(
-    (expected) => Math.abs(window.scrollY - Number(expected)) <= 2,
-    rememberedScroll,
-  );
-  const mobilePower = page
-    .locator("imprint-library-browser .command-open", { hasText: "Power" })
-    .first();
-  await mobilePower.click();
-  const mobileInspectorClose = page.getByRole("button", {
-    name: "Close command details",
-  });
-  await mobileInspectorClose.waitFor();
-  await page.waitForFunction(() => {
-    const host = document
-      .querySelector("imprint-refinery-card")
-      ?.shadowRoot?.querySelector("imprint-library-inspector");
-    const close = host?.shadowRoot?.querySelector(".inspector-close");
-    return Boolean(close && close.getRootNode().activeElement === close);
-  });
-  assert.equal(
-    await mobileInspectorClose.evaluate(
-      (element) => element.getRootNode().activeElement === element,
-    ),
-    true,
-    "Mobile Inspector did not focus its close control",
-  );
-  assert.equal(
-    await page
-      .locator("imprint-library-inspector aside.inspector")
-      .getAttribute("role"),
-    "dialog",
-    "Mobile Inspector did not expose modal dialog semantics",
-  );
-  assert.equal(
-    await page
-      .locator("imprint-library-inspector aside.inspector")
-      .getAttribute("aria-modal"),
-    "true",
-    "Mobile Inspector did not expose aria-modal",
-  );
-  assert.equal(
-    await page
-      .locator("imprint-library-inspector section.library")
-      .getAttribute("inert"),
-    "",
-    "Mobile Inspector did not make its covered Library inert",
-  );
-  await mobileInspectorClose.press("Shift+Tab");
-  assert.equal(
-    await mobileInspectorClose.evaluate(
-      (element) => element.getRootNode().activeElement === element,
-    ),
-    false,
-    "Mobile Inspector focus trap did not reach its last control",
-  );
-  await page.keyboard.press("Tab");
-  assert.equal(
-    await mobileInspectorClose.evaluate(
-      (element) => element.getRootNode().activeElement === element,
-    ),
-    true,
-    "Mobile Inspector focus escaped instead of wrapping to Close",
-  );
   await page.keyboard.press("Escape");
   assert.equal(
-    await mobileInspectorClose.count(),
-    0,
-    "Escape did not close the mobile Inspector",
+    await signalSaveDialog.isVisible(),
+    true,
+    "Busy Signal Lab save dialog closed before its work completed",
   );
-  await page.waitForFunction(() => {
-    const browser = document
-      .querySelector("imprint-refinery-card")
-      ?.shadowRoot?.querySelector("imprint-library-inspector")
-      ?.shadowRoot?.querySelector("imprint-library-browser");
-    const command = browser?.shadowRoot?.querySelector(".command-open");
-    return Boolean(command && command.getRootNode().activeElement === command);
+  assert.equal(
+    await signalLabSaveHost.evaluate((element) => element.saveOpen),
+    true,
+    "Busy Signal Lab save state cleared before the dialog closed",
+  );
+  await signalLabSaveHost.evaluate(async (element) => {
+    element.busy = false;
+    await element.updateComplete;
   });
+  await page.keyboard.press("Escape");
+  await signalSaveDialog.waitFor({ state: "hidden" });
   assert.equal(
-    await mobilePower.evaluate(
-      (element) => element.getRootNode().activeElement === element,
-    ),
-    true,
-    "Closing the Inspector did not return focus to its command",
+    await signalLabSaveHost.evaluate((element) => element.saveOpen),
+    false,
+    "Signal Lab save state did not clear from the dialog closed event",
   );
-  await page.keyboard.press("Tab");
-  assert.equal(
-    await page.evaluate(() => {
-      let active = document.activeElement;
-      while (active?.shadowRoot?.activeElement)
-        active = active.shadowRoot.activeElement;
-      return (
-        active instanceof HTMLElement &&
-        ["BUTTON", "INPUT", "SELECT", "A"].includes(active.tagName)
-      );
-    }),
-    true,
-    "keyboard focus did not enter an interactive control",
-  );
+  await page.getByRole("heading", { name: "Signal Lab", exact: true }).waitFor();
 
-  const routePage = await browser.newPage({
-    viewport: { width: 1440, height: 1000 },
+  const signalLabPreviewHost = await openSignalLab("lab-preview", 760, 900);
+  const signalPreviewDialog = page.locator('[data-workflow="signal-preview"]');
+  await signalPreviewDialog.waitFor();
+  await assertFocusContained(signalPreviewDialog, "Signal preview dialog");
+  await signalLabPreviewHost.evaluate(async (element) => {
+    element.busy = true;
+    await element.updateComplete;
   });
-  routePage.on("console", (message) => {
-    if (message.type() === "error")
-      consoleErrors.push(`route: ${message.text()}`);
-  });
-  routePage.on("pageerror", (error) =>
-    consoleErrors.push(`route: ${error.message}`),
+  await page.keyboard.press("Escape");
+  assert.equal(
+    await signalPreviewDialog.isVisible(),
+    true,
+    "Busy Signal Lab preview dialog closed before its work completed",
   );
-  await routePage.addInitScript(() => {
-    if (location.pathname.endsWith("/tools/browser-fixtures/preview.html"))
-      history.replaceState({}, "", `/imprint-refinery${location.search}`);
+  assert.equal(
+    await signalLabPreviewHost.evaluate((element) => Boolean(element.lab.preview)),
+    true,
+    "Busy Signal Lab preview state cleared before the dialog closed",
+  );
+  await signalLabPreviewHost.evaluate(async (element) => {
+    element.busy = false;
+    await element.updateComplete;
   });
-  await routePage.goto(
-    `${server.origin}/tools/browser-fixtures/preview.html?view=library&theme=dark`,
+  await signalPreviewDialog
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
+  await signalPreviewDialog.waitFor({ state: "hidden" });
+  assert.equal(
+    await signalLabPreviewHost.evaluate((element) => Boolean(element.lab.preview)),
+    false,
+    "Signal Lab preview state did not clear from the dialog closed event",
+  );
+  await page.getByRole("heading", { name: "Signal Lab", exact: true }).waitFor();
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await openSignalLab("lab");
+  const reducedMotionStatus = page.locator(".irf-status").first();
+  const signalLab = page.locator("imprint-signal-lab");
+  const timerStarted = await signalLab.evaluate(async (element) => {
+    element.busy = true;
+    element.lab = { ...element.lab, testCooldownUntil: Date.now() + 2_000 };
+    await element.updateComplete;
+    return element.cooldownTimer !== undefined;
+  });
+  assert.equal(timerStarted, true, "Signal Lab did not start its bounded cooldown timer");
+  assert.equal(
+    await reducedMotionStatus.evaluate((element) =>
+      getComputedStyle(element.querySelector(".irf-status-indicator")).animationName,
+    ),
+    "none",
+    "Busy status animation ignored reduced-motion preference",
+  );
+  const timerCleared = await signalLab.evaluate(async (element) => {
+    element.remove();
+    await Promise.resolve();
+    return element.cooldownTimer === undefined;
+  });
+  assert.equal(timerCleared, true, "Signal Lab cooldown timer survived disconnection");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+
+  await open("no-blaster");
+  assert.equal(await page.getByRole("heading", { name: "Silkycasters RGBW", exact: true }).count(), 1);
+  assert.equal(await page.getByRole("button", { name: "Test Power", exact: true }).first().isDisabled(), true);
+  await page.getByRole("tab", { name: "Infrared hardware", exact: true }).click();
+  assert.equal(await page.getByText("No Home Assistant IR emitter entities are available.", { exact: true }).count(), 1);
+
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(
+    `${server.origin}/tools/browser-fixtures/preview.html?view=unconfigured-appliance&theme=dark`,
     { waitUntil: "networkidle" },
   );
-  await routePage.waitForFunction(
+  await page.waitForFunction(
     () => document.documentElement.dataset.fixtureReady === "true",
   );
-  await routePage.waitForURL(
-    (url) =>
-      url.pathname === "/imprint-refinery" &&
-      url.searchParams.get("screen") === "command",
-  );
-  await routePage.getByRole("tab", { name: "Signal", exact: true }).click();
-  await routePage
-    .locator("imprint-command-inspector")
-    .getByRole("button", { name: "Zoom in" })
-    .click();
-  await routePage.waitForURL(
-    (url) =>
-      url.searchParams.get("tab") === "signal" &&
-      url.searchParams.get("zoom") === "2",
-  );
-  await routePage.getByRole("button", { name: "Open in Signal Lab" }).click();
-  await routePage.waitForURL((url) => url.searchParams.get("screen") === "lab");
-  await routePage.getByRole("tab", { name: "Decoded", exact: true }).click();
-  await routePage
-    .locator("imprint-signal-lab label.field", { hasText: "Bitstream decoder" })
-    .locator("select")
-    .selectOption("pulse_distance");
-  await routePage.waitForURL(
-    (url) => url.searchParams.get("decoder") === "pulse_distance",
+  await page.getByRole("heading", { name: "Appliances", exact: true }).waitFor();
+  const unconfiguredAppliance = page.locator(
+    '[data-appliance-id="unconfigured_appliance"]',
   );
   assert.equal(
-    await routePage
-      .locator("imprint-refinery-card")
-      .evaluate((element) => element.lab?.binaryDecoderMode),
-    "pulse_distance",
-    "manual bitstream decoder did not reach route state",
-  );
-  await routePage
-    .getByRole("tab", { name: "Encoded code", exact: true })
-    .click();
-  await routePage
-    .locator("imprint-signal-lab .code-toolbar select")
-    .selectOption("girr");
-  await routePage.waitForURL(
-    (url) =>
-      url.searchParams.get("lab_tab") === "code" &&
-      url.searchParams.get("format") === "girr",
-  );
-  await routePage.reload({ waitUntil: "networkidle" });
-  await routePage.waitForFunction(
-    () => document.documentElement.dataset.fixtureReady === "true",
+    await unconfiguredAppliance.getByText("Choose a remote profile", { exact: true }).count(),
+    1,
   );
   assert.equal(
-    new URL(routePage.url()).searchParams.get("decoder"),
-    "pulse_distance",
-    "Signal Lab decoder disappeared from its permalink",
+    await unconfiguredAppliance.getByText("Choose an IR emitter", { exact: true }).count(),
+    1,
   );
   assert.equal(
-    await routePage
-      .locator("imprint-refinery-card")
-      .evaluate((element) => element.lab?.binaryDecoderMode),
-    "pulse_distance",
-    "Signal Lab decoder was not restored into route state",
+    await unconfiguredAppliance.getByText("Setup required", { exact: true }).count(),
+    1,
   );
   assert.equal(
-    await routePage
-      .getByRole("tab", { name: "Encoded code", exact: true })
-      .getAttribute("aria-selected"),
-    "true",
-    "Signal Lab permalink did not restore the active tab",
-  );
-  assert.equal(
-    await routePage
-      .locator("imprint-signal-lab .code-toolbar select")
-      .inputValue(),
-    "girr",
-    "Signal Lab permalink did not restore its representation",
-  );
-  await routePage.getByRole("tab", { name: "Decoded", exact: true }).click();
-  assert.equal(
-    await routePage
-      .locator("imprint-signal-lab")
-      .evaluate((element) => element.lab?.binaryDecoderMode),
-    "pulse_distance",
-    "restored decoder did not reach the Signal Lab component",
-  );
-  assert.equal(
-    await routePage
-      .locator("imprint-signal-lab")
-      .evaluate((element) => element.binaryMode),
-    "pulse_distance",
-    "restored decoder did not reach Signal Lab local state",
-  );
-  await routePage.waitForFunction(() => {
-    const card = document.querySelector("imprint-refinery-card");
-    const lab = card?.shadowRoot?.querySelector("imprint-signal-lab");
-    return (
-      lab?.shadowRoot?.querySelector(".decoder-control select")?.value ===
-      "pulse_distance"
-    );
-  });
-  assert.equal(
-    await routePage
-      .locator("imprint-signal-lab label.field", {
-        hasText: "Bitstream decoder",
-      })
-      .locator("select")
-      .inputValue(),
-    "pulse_distance",
-    "Signal Lab permalink did not restore the manual bitstream decoder",
-  );
-  await routePage
-    .getByRole("tab", { name: "Encoded code", exact: true })
-    .click();
-  await routePage.goBack({ waitUntil: "networkidle" });
-  await routePage
-    .locator("imprint-command-inspector .head h2", { hasText: "Power" })
-    .waitFor();
-  assert.equal(
-    await routePage
-      .getByRole("tab", { name: "Signal", exact: true })
-      .getAttribute("aria-selected"),
-    "true",
-    "Back did not restore the Inspector tab",
-  );
-  assert.equal(
-    await routePage
-      .locator("imprint-command-inspector imprint-waveform")
-      .evaluate((element) => element.zoom),
-    2,
-    "Back did not restore Inspector zoom",
-  );
-  await routePage
-    .getByRole("button", { name: "Actions for Power" })
-    .first()
-    .click();
-  await routePage.getByRole("button", { name: "Rename", exact: true }).click();
-  await routePage.waitForURL(
-    (url) => url.searchParams.get("dialog") === "rename-command",
-  );
-  await routePage.reload({ waitUntil: "networkidle" });
-  await routePage.waitForFunction(
-    () => document.documentElement.dataset.fixtureReady === "true",
-  );
-  await routePage.getByRole("dialog", { name: "Rename command" }).waitFor();
-  await routePage.evaluate(() => {
-    sessionStorage.removeItem("imprint-refinery.route.learn");
-    history.replaceState(
-      {},
-      "",
-      "/imprint-refinery?view=library&theme=dark&screen=learn&location=living_room&appliance=television",
-    );
-  });
-  await routePage.reload({ waitUntil: "networkidle" });
-  await routePage.waitForFunction(
-    () => document.documentElement.dataset.fixtureReady === "true",
-  );
-  await routePage
-    .getByText(
-      "The previous capture screen was not resumed because opening a URL must not start hardware capture.",
-      { exact: true },
-    )
-    .waitFor();
-  assert.equal(
-    (
-      await routePage.evaluate(() => window.__IMPRINT_REFINERY_FIXTURES__.calls)
-    ).some((call) => (call.action || call.service) === "capture_signal"),
-    false,
-    "a learning permalink restarted hardware capture",
-  );
-  await routePage.close();
-
-  assert(
-    observedCalls.some(
-      (call) => (call.action || call.service) === "send_signal",
-    ),
-    "capture flow did not test a command",
-  );
-  assert(
-    observedCalls.some(
-      (call) => (call.action || call.service) === "store_command",
-    ),
-    "capture flow did not save a command",
-  );
-  assert(
-    observedCalls.some(
-      (call) => (call.action || call.service) === "catalog_search",
-    ),
-    "catalog flow did not search",
-  );
-  assert(
-    observedCalls.some(
-      (call) => (call.action || call.service) === "catalog_guided_start",
-    ),
-    "guided matching did not start",
-  );
-  assert(
-    observedCalls.some(
-      (call) => (call.action || call.service) === "catalog_guided_test",
-    ),
-    "guided matching did not send an explicit test",
-  );
-  assert(
-    observedCalls.some(
-      (call) => (call.action || call.service) === "catalog_guided_answer",
-    ),
-    "guided matching did not record the answer",
-  );
-  assert(
-    observedCalls.some(
-      (call) => (call.action || call.service) === "create_appliance",
-    ),
-    "catalog profile was not imported",
+    await unconfiguredAppliance.getByText("Open remote profile", { exact: true }).count(),
+    0,
   );
   assert.deepEqual(
-    consoleErrors,
-    [],
-    `browser console errors: ${consoleErrors.join(" | ")}`,
+    await infraredIoCounts(),
+    { sendSignal: 0, captureSignal: 0 },
+    "Rendering an unconfigured appliance performed infrared I/O",
   );
-  console.log(
-    "Browser acceptance passed: Learn, Library CRUD entry points, atomic Inspector comparison, permalinks, revisions, binary decoding, Signal Lab editing/zoom/repeat optimization, catalog/import/guided matching, error states, mobile geometry, and keyboard focus.",
+
+  await open("no-receiver");
+  await page.locator(".profile", { hasText: "Silkycasters RGBW" }).getByRole("button", { name: "Learn command", exact: true }).click();
+  const noReceiverWorkflow = page.locator('[data-workflow="learn-command-choose"]');
+  assert.equal(
+    await noReceiverWorkflow.getByText(/No Home Assistant IR receiver is available/).count(),
+    1,
   );
+  assert.equal(
+    await noReceiverWorkflow.locator(".irf-notice", { hasText: /No Home Assistant IR receiver is available/ }).getAttribute("role"),
+    "note",
+    "Missing-receiver guidance should be a static note, not an alert",
+  );
+  assert.equal(await noReceiverWorkflow.getByRole("button", { name: "Begin listening", exact: true }).isDisabled(), true);
+
+  await open("compatibility-adapter");
+  await page.getByRole("tab", { name: "Infrared hardware", exact: true }).click();
+  assert.equal(await page.getByRole("link", { name: "Add compatibility adapter", exact: true }).count(), 1);
+
+  await open("empty");
+  assert.equal(await page.getByText("No appliances", { exact: true }).count(), 1);
+  assert.equal(await page.locator("ha-empty-state").count(), 0, "Optional empty state must have an immediate fallback");
+  await open("empty", 1440, 1000, { optionalEmpty: true });
+  assert.equal(await page.locator("ha-empty-state").count(), 1, "Registered Home Assistant empty state should be used for a full workspace");
+  assert.equal(await page.getByText("No appliances", { exact: true }).count(), 1);
+
+  const textareaFallbackPage = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  await textareaFallbackPage.goto(
+    `${server.origin}/tools/browser-fixtures/preview.html?view=library&theme=dark&missingTextarea=1`,
+    { waitUntil: "networkidle" },
+  );
+  await textareaFallbackPage.waitForFunction(
+    () => document.documentElement.dataset.fixtureReady === "true",
+  );
+  await textareaFallbackPage.getByRole("button", { name: "Create custom signal", exact: true }).last().click();
+  const fallbackTextarea = textareaFallbackPage.getByLabel("Signal code", { exact: true });
+  assert.equal(await textareaFallbackPage.locator("ha-textarea").count(), 0, "Undefined optional ha-textarea should not be rendered");
+  assert.equal(await fallbackTextarea.evaluate((element) => element.localName), "textarea");
+  await fallbackTextarea.fill("+9000 -4500");
+  assert.equal(await fallbackTextarea.inputValue(), "+9000 -4500");
+  await textareaFallbackPage.close();
+  await open("load-error");
+  assert.equal(await page.getByRole("alert").count(), 1, "Load failures should use Home Assistant alert semantics");
+  assert.equal(errors.length, 0, `Browser errors: ${errors.join("\n")}`);
+  console.log("Browser smoke checks passed.");
 } finally {
   await browser.close();
   await server.close();

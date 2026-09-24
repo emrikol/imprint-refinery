@@ -10,9 +10,7 @@ from custom_components.imprint_refinery.config_flow import (
     MANUAL_DEVICE,
     ImprintRefineryConfigFlow,
     ImprintRefineryEmitterSubentryFlow,
-    _device_entries,
     _manual_setup_label,
-    _zha_ieee,
 )
 from custom_components.imprint_refinery.const import (
     CONF_CAPTURE_REASSERT_INTERVAL,
@@ -23,14 +21,13 @@ from custom_components.imprint_refinery.const import (
     CONF_ENDPOINT_ID,
     CONF_IEEE,
     CONF_TRANSPORT,
-    DEFAULT_CAPTURE_REASSERT_INTERVAL,
-    DEFAULT_CAPTURE_TIMEOUT,
     DEFAULT_CLUSTER_ID,
     DEFAULT_ENDPOINT_ID,
     EMITTER_SUBENTRY_TYPE,
     HUB_ENTRY_DATA,
     ZHA_BRIDGE,
 )
+from custom_components.imprint_refinery.hardware import _device_entries, _zha_ieee
 
 
 def execute(awaitable):
@@ -123,41 +120,22 @@ def test_manual_choice_is_always_english_until_a_human_translation_exists() -> N
     assert _manual_setup_label("uk") == "Manual setup"
 
 
-def test_first_setup_creates_workspace_and_normalized_emitter_subentry(
+def test_first_setup_creates_hardware_neutral_workspace(
     monkeypatch,
 ) -> None:
     flow = ImprintRefineryConfigFlow()
     flow.hass = hass()
     monkeypatch.setattr(flow, "_async_current_entries", list)
-    monkeypatch.setattr(
-        flow,
-        "_async_discover_zha_emitters",
-        AsyncMock(
-            return_value={
-                "zha-device": emitter_data("AA:BB") | {"label": "Desk transmitter"}
-            }
-        ),
-    )
+    discover = AsyncMock()
+    monkeypatch.setattr(flow, "_async_discover_zha_emitters", discover)
 
-    result = execute(
-        flow.async_step_user(
-            {
-                CONF_DEVICE: "zha-device",
-            }
-        )
-    )
+    result = execute(flow.async_step_user())
 
     assert result["type"] == "create_entry"
     assert result["title"] == "Imprint Refinery"
     assert result["data"] == HUB_ENTRY_DATA
-    [created] = result["subentries"]
-    assert created["unique_id"] == "aabb"
-    assert created["title"] == "Desk transmitter"
-    assert created["data"][CONF_CAPTURE_TIMEOUT] == DEFAULT_CAPTURE_TIMEOUT
-    assert (
-        created["data"][CONF_CAPTURE_REASSERT_INTERVAL]
-        == DEFAULT_CAPTURE_REASSERT_INTERVAL
-    )
+    assert result["subentries"] == ()
+    discover.assert_not_awaited()
 
 
 def test_second_workspace_is_not_allowed(monkeypatch) -> None:
@@ -167,26 +145,6 @@ def test_second_workspace_is_not_allowed(monkeypatch) -> None:
     result = execute(flow.async_step_user())
     assert result["type"] == "abort"
     assert result["reason"] == "single_instance_allowed"
-
-
-def test_selecting_manual_opens_the_manual_form(monkeypatch) -> None:
-    flow = ImprintRefineryConfigFlow()
-    flow.hass = hass()
-    monkeypatch.setattr(flow, "_async_current_entries", list)
-    monkeypatch.setattr(
-        flow, "_async_discover_zha_emitters", AsyncMock(return_value={})
-    )
-    result = execute(
-        flow.async_step_user(
-            {
-                CONF_DEVICE: MANUAL_DEVICE,
-                CONF_CAPTURE_TIMEOUT: 60,
-                CONF_CAPTURE_REASSERT_INTERVAL: 8,
-            }
-        )
-    )
-    assert result["type"] == "form"
-    assert result["step_id"] == "manual"
 
 
 def test_discovery_skips_unusable_zha_devices(monkeypatch) -> None:
@@ -219,11 +177,11 @@ def test_discovery_skips_unusable_zha_devices(monkeypatch) -> None:
     flow = ImprintRefineryConfigFlow()
     flow.hass = hass()
     monkeypatch.setattr(
-        "custom_components.imprint_refinery.config_flow.dr.async_get",
+        "custom_components.imprint_refinery.hardware.dr.async_get",
         lambda _hass: SimpleNamespace(devices=devices),
     )
     monkeypatch.setattr(
-        "custom_components.imprint_refinery.config_flow.zha_proxy",
+        "custom_components.imprint_refinery.hardware.zha_proxy",
         lambda _hass, device_id: (
             (_ for _ in ()).throw(RuntimeError("offline"))
             if device_id == "broken"
@@ -231,13 +189,20 @@ def test_discovery_skips_unusable_zha_devices(monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        "custom_components.imprint_refinery.config_flow.discover_zha_driver",
-        lambda proxy: ("zosung_ts1201", 1, 0xE004),
+        "custom_components.imprint_refinery.hardware.discover_zha_driver",
+        lambda proxy, **identity: (
+            "hobeian_zg_ir01"
+            if identity == {"manufacturer": "Maker", "model": "Model"}
+            else "zosung_ts1201",
+            1,
+            0xE004,
+        ),
     )
 
     found = execute(flow._async_discover_zha_emitters())
     assert set(found) == {"good"}
     assert found["good"]["label"] == "Hall · Maker · Model · 00:11"
+    assert found["good"][CONF_DRIVER] == "hobeian_zg_ir01"
 
 
 def test_subentry_creation_rejects_existing_hardware_and_accepts_new_hardware() -> None:
@@ -274,6 +239,12 @@ def test_subentry_picker_filters_emitters_already_in_the_workspace(monkeypatch) 
     form = execute(flow.async_step_user())
     assert form["type"] == "form"
     assert set(flow._discovered) == {"new"}
+    device_choices = next(
+        validator.container
+        for field, validator in form["data_schema"].schema.items()
+        if str(field) == CONF_DEVICE
+    )
+    assert set(device_choices) == {"new", MANUAL_DEVICE}
 
 
 def test_reconfigure_updates_capture_timing_and_reloads_workspace() -> None:

@@ -1,7 +1,3 @@
 {
-  "services": {
-    "send_command": {
-      "service": "mdi:remote"
-    }
-  }
+  "services": {}
 }

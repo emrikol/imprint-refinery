@@ -1,69 +1,63 @@
 # Imprint Refinery backup format
 
-Imprint Refinery uses a portable JSON document for command, appliance,
-location, and complete-library backups. Files conventionally use the
-`.imprint.json` suffix.
+Imprint Refinery uses a portable JSON document for remote profiles and optional
+appliance references. Files conventionally use the `.imprint.json` suffix.
 
 The current document identity is:
 
 ```json
 {
   "schema": "imprint_refinery.backup",
-  "version": 1
+  "version": 2
 }
 ```
-
-Importers reject an unknown `version` instead of guessing. New exports always
-use the versioned format below.
 
 ## Top-level object
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `schema` | string | Always `imprint_refinery.backup`. |
-| `version` | integer | Currently `1`. |
-| `scope` | string | `library`, `location`, or `appliance`. |
+| `version` | integer | Currently `2`. |
+| `scope` | string | `library` or `remote_profile`. |
 | `history` | string | `current` or `full`. |
-| `command_count` | integer | Integrity check for the number of commands. |
-| `locations` | object | Locations keyed by stable, portable ID. |
+| `command_count` | integer | Integrity check for included commands. |
+| `remote_profiles` | object | Reusable profiles keyed by portable ID. |
+| `appliances` | object | Optional names and profile references. |
 
-Each location contains a display `name` and `appliances`. Each appliance in
-`appliances` contains `name`, `appliance_type`, `preferred_platform`, and
-`commands`. These IDs are library identifiers, not Home Assistant entity or
-device identifiers.
+A remote profile contains `name`, `appliance_type`, and `commands`. An exported
+appliance contains only its display name, remote-profile reference, preferred
+projection, and optional Area-name suggestion. Hardware routes, Home Assistant
+registry IDs, and Area IDs are never portable library data.
 
 ## Commands
 
-Commands are keyed by their stable command ID. A command can contain:
+Commands are keyed by stable command ID and may contain:
 
-- `name`, `icon`, and `role` display and behavior metadata;
+- `name`, `icon`, and `role` metadata;
 - lossless `code` and `format` source payloads;
-- canonical `signal`, including carrier source, timings, and semantic regions;
-- `analysis`, including fingerprints, recognition evidence, analyzer version,
-  and corpus version when known;
-- sanitized `source` provenance and compatibility notes.
+- canonical `signal` timings and carrier provenance;
+- structural `analysis` and recognition evidence;
+- sanitized `source` provenance.
 
-A `full` backup also contains immutable `revisions`, `current_revision`, and
-optional `revision_labels`. A `current` backup omits historical revisions; its
-command becomes revision 1 when imported.
+A `full` backup contains immutable revisions, the current revision, and
+optional labels. A `current` backup omits historical revisions; the current
+command becomes the initial imported revision.
 
-## Privacy and safety
+## Privacy and restore behavior
 
-Exports omit emitters and installation-specific values, including Zigbee
-addresses, endpoints, clusters, Home Assistant entity IDs, hostnames, and
-source-command registry references. Export and preview never transmit or mutate
-a command.
+Exports remove emitter and receiver references, entity and device IDs, Zigbee
+addresses, endpoints, clusters, hostnames, and other installation-specific
+values.
 
-Restore validates the complete versioned document before changing the registry.
-It recreates missing organization and history but never silently overwrites an
-existing command. Ordinary import can instead copy selected commands into a
-chosen appliance.
+Restored remote profiles are immediately usable for inspection and editing.
+Restore reviews every appliance and requires an explicit local IR emitter
+selection. An exported Area name is only a mapping suggestion; the user maps it
+to a Home Assistant Area, and the Area Registry remains authoritative.
 
-## Compatibility policy
+## Compatibility
 
-- Readers accept version 1.
-- Readers fail clearly on newer versions they do not understand; source text
-  remains available to the user for recovery.
-- Writers emit only the current version.
-- Any future version requires an explicit migration and regression fixture;
-  version numbers are never reinterpreted in place.
+- Readers accept version 2.
+- Readers also accept version 1 and convert every legacy appliance into a
+  separate remote profile plus appliance.
+- Writers emit version 2 only.
+- Unknown newer versions fail clearly rather than being guessed.

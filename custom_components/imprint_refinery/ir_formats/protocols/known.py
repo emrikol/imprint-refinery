@@ -2,6 +2,9 @@
 
 from typing import Any
 
+from infrared_protocols.commands.rc5 import RC5Command
+from infrared_protocols.commands.sony import SonyCommand
+
 from ..model import DEFAULT_CARRIER_HZ, IRSignal
 
 KNOWN_PROTOCOLS = (
@@ -61,13 +64,23 @@ def encode_known_protocol(
         return _pulse_distance_signal(data, 32, 4500, 4500, 550, 550, 1650)
     if protocol in {"SIRC", "SIRC15", "SIRC20"}:
         address_bits = {"SIRC": 5, "SIRC15": 8, "SIRC20": 13}[protocol]
-        return _encode_sirc(address, command, address_bits)
+        return _signal_from_upstream(
+            SonyCommand(
+                address=address,
+                address_bits=address_bits,
+                command=command,
+            )
+        )
     if protocol in {"RC5", "RC5X"}:
-        return _encode_rc5(
-            address,
-            command,
-            extended=protocol == "RC5X",
-            toggle=toggle,
+        _require_range(address, 5, "RC5 address")
+        _require_range(command, 7 if protocol == "RC5X" else 6, "RC5 command")
+        _require_range(toggle, 1, "RC5 toggle")
+        return _signal_from_upstream(
+            RC5Command(
+                address=address,
+                command=command | (0x40 if protocol == "RC5X" else 0),
+                toggle=toggle,
+            )
         )
     if protocol == "RC6":
         return _encode_rc6(address, command, toggle=toggle)
@@ -147,42 +160,12 @@ def _pulse_distance_signal(
     return IRSignal(timings=timings, carrier_frequency=DEFAULT_CARRIER_HZ)
 
 
-def _encode_sirc(address: int, command: int, address_bits: int) -> IRSignal:
-    _require_range(address, address_bits, f"SIRC{7 + address_bits} address")
-    _require_range(command, 7, "SIRC command")
-    data = command | (address << 7)
-    timings = [2400]
-    for index in range(7 + address_bits):
-        timings.extend([600, 1200 if data & (1 << index) else 600])
-    timings.append(45000 - sum(timings))
-    return IRSignal(timings=timings, carrier_frequency=40000)
-
-
-def _encode_rc5(
-    address: int,
-    command: int,
-    *,
-    extended: bool,
-    toggle: int,
-) -> IRSignal:
-    _require_range(address, 5, "RC5 address")
-    _require_range(command, 7 if extended else 6, "RC5 command")
-    _require_range(toggle, 1, "RC5 toggle")
-    if extended:
-        command |= 0x40
-    start_2 = 0 if command & 0x40 else 1
-    bits = [1, start_2, toggle]
-    bits.extend((address >> index) & 1 for index in range(4, -1, -1))
-    bits.extend((command >> index) & 1 for index in range(5, -1, -1))
-    signed: list[int] = []
-    for bit in bits:
-        _append_signed(signed, -889 if bit else 889)
-        _append_signed(signed, 889 if bit else -889)
-    if signed and signed[0] < 0:
-        signed.pop(0)
-    if signed and signed[-1] < 0:
-        signed.pop()
-    return IRSignal(timings=[abs(value) for value in signed], carrier_frequency=36000)
+def _signal_from_upstream(command: Any) -> IRSignal:
+    """Convert one upstream protocol command into Imprint's lossless model."""
+    return IRSignal(
+        timings=[abs(value) for value in command.get_raw_timings()],
+        carrier_frequency=command.modulation,
+    )
 
 
 def _encode_rc6(address: int, command: int, *, toggle: int) -> IRSignal:

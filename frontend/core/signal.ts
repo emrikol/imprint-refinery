@@ -89,10 +89,16 @@ export const previewImpact = (
 ): LabPreview => {
   const common = Math.min(before.length, after.length);
   let maxTimingError = 0;
+  let maxTimingErrorPercent = 0;
   let changed = Math.abs(before.length - after.length);
   for (let index = 0; index < common; index++) {
     const delta = Math.abs(before[index] - after[index]);
-    maxTimingError = Math.max(maxTimingError, delta);
+    if (delta > maxTimingError) {
+      maxTimingError = delta;
+      maxTimingErrorPercent = before[index]
+        ? (delta / before[index]) * 100
+        : 0;
+    }
     if (delta) changed++;
   }
   const roundTripChanges =
@@ -105,7 +111,11 @@ export const previewImpact = (
     timings: [...after],
     changed,
     durationDelta: timingTotal(after) - timingTotal(before),
+    durationDeltaPercent: timingTotal(before)
+      ? ((timingTotal(after) - timingTotal(before)) / timingTotal(before)) * 100
+      : 0,
     maxTimingError,
+    maxTimingErrorPercent,
     frameDelta: frameRanges(after).length - frameRanges(before).length,
     roundTripChanges,
     evidenceClass: analysis.evidence_class || analysis.confidence || "unknown",

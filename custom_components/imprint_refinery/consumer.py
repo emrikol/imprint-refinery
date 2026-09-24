@@ -1,32 +1,24 @@
 """Project stored signals into Home Assistant consumer entities."""
 
 from collections.abc import Callable
-import logging
 from typing import Any
 
-from homeassistant.components import infrared
+from homeassistant.components.infrared import InfraredEmitterConsumerEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_ON
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ServiceValidationError
-from homeassistant.helpers import (
-    area_registry as ar,
-    device_registry as dr,
-    entity_registry as er,
-)
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+import voluptuous as vol
 
-from .const import DOMAIN, HOME_ASSISTANT_IR, SIGNAL_REGISTRY_UPDATED
-from .emitter_identity import normalize_emitter_ref
+from .const import DOMAIN, SIGNAL_REGISTRY_UPDATED
 from .entity_projection import EntityBlueprint, project_platform
-from .errors import ImprintRefineryError
 from .signal_command import LibraryPath, RawSignalCommand, signal_from_command
 from .storage import SignalLibraryStore
 
-_LOGGER = logging.getLogger(__name__)
-_EMITTER_DOMAIN = "infrared"
 EntityBuilder = Callable[[SignalLibraryStore, EntityBlueprint], Entity]
 
 
@@ -95,16 +87,28 @@ class ProjectionController:
 
             for unique_id in tuple(stale):
                 await self._discard(self.entities.pop(unique_id))
-            for unique_id in retained:
-                self.entities[unique_id].update_blueprint(desired[unique_id])
+            rebound = []
+            for unique_id in tuple(retained):
+                entity = self.entities[unique_id]
+                blueprint = desired[unique_id]
+                if (
+                    getattr(entity, "emitter_reference", blueprint.emitter)
+                    != blueprint.emitter
+                ):
+                    await entity.async_remove()
+                    replacement = self.build_entity(self.store, blueprint)
+                    self.entities[unique_id] = replacement
+                    rebound.append(replacement)
+                else:
+                    entity.update_blueprint(blueprint)
 
             additions = [
                 self.build_entity(self.store, desired[unique_id])
                 for unique_id in sorted(missing)
             ]
             self.entities.update({entity.unique_id: entity for entity in additions})
-            if additions:
-                self.add_entities(additions)
+            if additions or rebound:
+                self.add_entities([*rebound, *additions])
             if generation == self._requested:
                 return
 
@@ -132,7 +136,7 @@ class ProjectionController:
         self.entities.clear()
 
 
-class LibraryEntity:
+class LibraryEntity(InfraredEmitterConsumerEntity):
     """Entity identity and delivery behavior backed by a library blueprint."""
 
     _attr_has_entity_name = True
@@ -142,6 +146,10 @@ class LibraryEntity:
 
     def __init__(self, store: SignalLibraryStore, blueprint: EntityBlueprint) -> None:
         self._store = store
+        self._infrared_emitter_entity_id = (
+            _resolve_emitter_entity_id(getattr(store, "hass", None), store, blueprint)
+            or "infrared.unassigned"
+        )
         self.update_blueprint(blueprint)
 
     def update_blueprint(self, blueprint: EntityBlueprint) -> None:
@@ -150,22 +158,27 @@ class LibraryEntity:
         info = DeviceInfo(
             identifiers={(DOMAIN, blueprint.registry_device_key)},
             name=blueprint.title,
-            suggested_area=blueprint.area_name,
             configuration_url=blueprint.configuration_url,
         )
-        emitter_id = _emitter_key_or_none(self._store, blueprint)
+        emitter_entity_id = _resolve_emitter_entity_id(
+            getattr(self._store, "hass", None), self._store, blueprint
+        )
         hass = getattr(self._store, "hass", None)
-        if emitter_id and hass is not None:
-            emitter = _owned_device(dr.async_get(hass), emitter_id)
-            if emitter is not None:
-                info["via_device_id"] = emitter.id
+        if emitter_entity_id and hass is not None:
+            emitter = er.async_get(hass).async_get(emitter_entity_id)
+            if emitter is not None and emitter.device_id:
+                info["via_device_id"] = emitter.device_id
         self._attr_device_info = info
         if self.entity_id is not None:
             self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
         """Fill appliance metadata that DeviceInfo only suggests on first creation."""
-        await super().async_added_to_hass()
+        if self._infrared_emitter_entity_id == "infrared.unassigned":
+            self._attr_available = False
+            await super(InfraredEmitterConsumerEntity, self).async_added_to_hass()
+        else:
+            await super().async_added_to_hass()
         if getattr(self, "hass", None) is None:
             return
         devices = dr.async_get(self.hass)
@@ -175,11 +188,6 @@ class LibraryEntity:
         changes: dict[str, str] = {}
         if device.configuration_url != self._blueprint.configuration_url:
             changes["configuration_url"] = self._blueprint.configuration_url
-        if self._blueprint.area_name and device.area_id is None:
-            area = ar.async_get(self.hass).async_get_or_create(
-                self._blueprint.area_name
-            )
-            changes["area_id"] = area.id
         if changes:
             devices.async_update_device(device.id, **changes)
 
@@ -187,15 +195,42 @@ class LibraryEntity:
     def registry_device_key(self) -> str:
         return self._blueprint.registry_device_key
 
+    @property
+    def emitter_reference(self) -> str | None:
+        """Return the stable emitter reference used to detect route changes."""
+        return self._blueprint.emitter
+
     async def async_send_stored_command(self, command_id: str) -> None:
-        await SignalSender(self.hass, self._store).send(
-            self._blueprint, command_id, context=self._context
+        if self._infrared_emitter_entity_id == "infrared.unassigned":
+            raise ServiceValidationError(
+                f"IR device {self._blueprint.registry_device_key} has no assigned infrared emitter"
+            )
+        if command_id not in self._blueprint.commands:
+            raise ServiceValidationError(
+                f"IR device {self._blueprint.registry_device_key} has no command_id {command_id}"
+            )
+        command = self._store.command_at(
+            self._blueprint.remote_profile,
+            command_id,
+        )
+        await self._send_command(
+            RawSignalCommand(
+                signal_from_command(command),
+                path=LibraryPath(
+                    remote_profile_id=self._blueprint.remote_profile,
+                    appliance_id=self._blueprint.appliance,
+                    command_id=command_id,
+                ),
+            )
         )
 
     async def async_send_feature_command(self, role: str) -> None:
-        await SignalSender(self.hass, self._store).send_feature(
-            self._blueprint, role, context=self._context
-        )
+        command_id = self._blueprint.roles.get(role)
+        if command_id is None:
+            raise ServiceValidationError(
+                f"IR device {self._blueprint.registry_device_key} has no role {role}"
+            )
+        await self.async_send_stored_command(command_id)
 
 
 class AssumedPower:
@@ -248,108 +283,19 @@ class AssumedPower:
         self.async_write_ha_state()
 
 
-class SignalSender:
-    """Resolve stored signals and route them through an infrared entity."""
-
-    def __init__(self, hass: HomeAssistant, store: SignalLibraryStore) -> None:
-        self.hass = hass
-        self.store = store
-
-    async def send(
-        self,
-        blueprint: EntityBlueprint,
-        command_id: str,
-        *,
-        context: Any | None = None,
-    ) -> None:
-        if command_id not in blueprint.commands:
-            raise ServiceValidationError(
-                f"IR device {blueprint.registry_device_key} has no command_id {command_id}"
-            )
-        command = self.store.command_at(
-            blueprint.location, blueprint.appliance, command_id
-        )
-        try:
-            emitter = self.store.choose_emitter(blueprint.emitter)
-        except ImprintRefineryError as error:
-            raise ServiceValidationError(str(error)) from error
-        emitter_id = emitter_key(self.store, emitter)
-        external_entity = (
-            emitter.get("entity_id")
-            if emitter.get("transport") == HOME_ASSISTANT_IR
-            else None
-        )
-        emitter = (
-            str(external_entity)
-            if external_entity
-            else er.async_get(self.hass).async_get_entity_id(
-                _EMITTER_DOMAIN, DOMAIN, emitter_id
-            )
-        )
-        if emitter is None:
-            raise ServiceValidationError(
-                f"Infrared emitter entity for emitter {emitter_id} was not found"
-            )
-        await infrared.async_send_command(
-            self.hass,
-            emitter,
-            RawSignalCommand(
-                signal_from_command(command),
-                path=LibraryPath(blueprint.location, blueprint.appliance, command_id),
-            ),
-            context=context,
-        )
-
-    async def send_feature(
-        self,
-        blueprint: EntityBlueprint,
-        role: str,
-        *,
-        context: Any | None = None,
-    ) -> None:
-        command_id = blueprint.roles.get(role)
-        if command_id is None:
-            raise ServiceValidationError(
-                f"IR device {blueprint.registry_device_key} has no role {role}"
-            )
-        await self.send(blueprint, command_id, context=context)
-
-
-def emitter_key(store: SignalLibraryStore, emitter: dict[str, Any]) -> str:
-    """Find the stable library key for a resolved emitter record."""
-    ieee = emitter.get("ieee")
-    address = normalize_emitter_ref(str(ieee)) if ieee is not None else None
-    match = next(
-        (
-            key
-            for key, candidate in store.data.get("emitters", {}).items()
-            if candidate is emitter
-            or (
-                address is not None
-                and candidate.get("ieee") is not None
-                and normalize_emitter_ref(str(candidate["ieee"])) == address
-            )
-        ),
-        None,
-    )
-    if match is None:
-        raise ServiceValidationError(
-            "Resolved IR emitter is not present in the registry"
-        )
-    return match
-
-
-def _emitter_key_or_none(
-    store: SignalLibraryStore, blueprint: EntityBlueprint
+def _resolve_emitter_entity_id(
+    hass: HomeAssistant | None,
+    store: SignalLibraryStore,
+    blueprint: EntityBlueprint,
 ) -> str | None:
+    """Resolve a stored emitter reference to its current Core entity ID."""
+    del store
+    if hass is None or not blueprint.emitter:
+        return None
+    registry = er.async_get(hass)
     try:
-        return emitter_key(store, store.choose_emitter(blueprint.emitter))
-    except (ImprintRefineryError, ServiceValidationError) as error:
-        _LOGGER.warning(
-            "Could not resolve emitter device for %s: %s",
-            blueprint.registry_device_key,
-            error,
-        )
+        return er.async_validate_entity_id(registry, blueprint.emitter)
+    except vol.Invalid:
         return None
 
 

@@ -1,63 +1,56 @@
-"""Hardware-neutral Home Assistant infrared routing tests."""
+"""Live Home Assistant Core infrared inventory tests."""
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
-
-from homeassistant.components.infrared import InfraredReceivedSignal
 
 from custom_components.imprint_refinery.hardware import (
-    InfraredHardware,
-    discover_home_assistant_emitters,
+    async_compatibility_adapter_available,
+    discover_infrared_hardware,
 )
-from custom_components.imprint_refinery.ir_formats import IRSignal
-from custom_components.imprint_refinery.signal_command import RawSignalCommand
 
 
-def test_native_discovery_pairs_entities_by_device_and_skips_our_bridge(
+def test_core_hardware_inventory_is_live_separate_and_includes_adapters(
     monkeypatch,
 ) -> None:
     emitter = SimpleNamespace(
         id="emitter-uuid",
-        entity_id="infrared.living_room_emitter",
-        platform="esphome",
+        entity_id="infrared.renamed_emitter",
+        platform="imprint_refinery",
         device_id="device-1",
-        config_entry_id="config-1",
         name=None,
         original_name="Emitter",
     )
     receiver = SimpleNamespace(
         id="receiver-uuid",
-        entity_id="infrared.living_room_receiver",
+        entity_id="infrared.receiver",
         platform="esphome",
-        device_id="device-1",
-        config_entry_id="config-1",
-    )
-    own_emitter = SimpleNamespace(
-        id="own-uuid",
-        entity_id="infrared.imprint_bridge",
-        platform="imprint_refinery",
         device_id="device-2",
-        config_entry_id="config-2",
+        name="Learning receiver",
+        original_name="Receiver",
     )
     entries = {
         emitter.entity_id: emitter,
         receiver.entity_id: receiver,
-        own_emitter.entity_id: own_emitter,
     }
-    registry = SimpleNamespace(async_get=lambda entity_id: entries.get(entity_id))
-    device = SimpleNamespace(
-        name_by_user="Living room IR",
-        name="Fallback",
-        manufacturer="Example",
-        model="IR-1",
-    )
+    registry = SimpleNamespace(async_get=entries.get)
     devices = SimpleNamespace(
-        async_get=lambda device_id: device if device_id == "device-1" else None
+        async_get=lambda device_id: SimpleNamespace(
+            id=device_id,
+            name_by_user="Living room IR" if device_id == "device-1" else None,
+            name="IR hardware",
+            area_id="living-room",
+        )
     )
-    hass = SimpleNamespace(
-        states=SimpleNamespace(get=lambda entity_id: SimpleNamespace(name="State name"))
+    areas = SimpleNamespace(
+        async_get_area=lambda area_id: SimpleNamespace(name="Living room")
     )
+    states = {
+        emitter.entity_id: SimpleNamespace(
+            state="2026-09-23T12:00:00+00:00", name="Emitter state"
+        ),
+        receiver.entity_id: SimpleNamespace(state="unavailable", name="Receiver"),
+    }
+    hass = SimpleNamespace(states=SimpleNamespace(get=states.get))
     monkeypatch.setattr(
         "custom_components.imprint_refinery.hardware.er.async_get",
         lambda candidate: registry,
@@ -67,80 +60,83 @@ def test_native_discovery_pairs_entities_by_device_and_skips_our_bridge(
         lambda candidate: devices,
     )
     monkeypatch.setattr(
+        "custom_components.imprint_refinery.hardware.ar.async_get",
+        lambda candidate: areas,
+    )
+    monkeypatch.setattr(
         "custom_components.imprint_refinery.hardware.infrared.async_get_emitters",
-        lambda candidate: [emitter.entity_id, own_emitter.entity_id],
+        lambda candidate: [emitter.entity_id],
     )
     monkeypatch.setattr(
         "custom_components.imprint_refinery.hardware.infrared.async_get_receivers",
         lambda candidate: [receiver.entity_id],
     )
 
-    assert discover_home_assistant_emitters(hass) == [
+    inventory = discover_infrared_hardware(hass)
+
+    assert inventory["emitters"] == [
         {
-            "key": "ha_emitteruuid",
-            "transport": "home_assistant_ir",
-            "entity_id": "emitter-uuid",
-            "receiver_entity_id": "receiver-uuid",
-            "name": "Living room IR",
-            "name_authoritative": True,
-            "manufacturer": "Example",
-            "model": "IR-1",
-            "can_capture": True,
+            "ref": "emitter-uuid",
+            "entity_id": "infrared.renamed_emitter",
+            "name": "Emitter",
+            "available": True,
+            "last_activity": "2026-09-23T12:00:00+00:00",
+            "platform": "imprint_refinery",
+            "compatibility_adapter": True,
+            "device_id": "device-1",
+            "device_name": "Living room IR",
+            "device_url": "/config/devices/device/device-1",
+            "entity_url": "/config/entities/entity/emitter-uuid",
+            "area_name": "Living room",
         }
     ]
+    assert inventory["receivers"][0]["ref"] == "receiver-uuid"
+    assert inventory["receivers"][0]["available"] is False
+    assert "receiver_entity_id" not in inventory["emitters"][0]
 
-
-def test_native_send_passes_raw_timings_to_home_assistant(monkeypatch) -> None:
-    send = AsyncMock()
+    emitter.entity_id = "infrared.after_rename"
+    entries[emitter.entity_id] = emitter
     monkeypatch.setattr(
-        "custom_components.imprint_refinery.hardware.infrared.async_send_command",
-        send,
+        "custom_components.imprint_refinery.hardware.infrared.async_get_emitters",
+        lambda candidate: [emitter.entity_id],
     )
-    signal = IRSignal([9000, 4500, 560, 560], 38_000)
-    hass = object()
-
-    asyncio.run(
-        InfraredHardware(hass).send(
-            {"transport": "home_assistant_ir", "entity_id": "emitter-uuid"},
-            signal,
-        )
-    )
-
-    command = send.await_args.args[2]
-    assert send.await_args.args[:2] == (hass, "emitter-uuid")
-    assert isinstance(command, RawSignalCommand)
-    assert command.get_raw_timings() == [9000, -4500, 560, -560]
+    states[emitter.entity_id] = states["infrared.renamed_emitter"]
+    refreshed = discover_infrared_hardware(hass)
+    assert refreshed["emitters"][0]["ref"] == "emitter-uuid"
+    assert refreshed["emitters"][0]["entity_id"] == "infrared.after_rename"
 
 
-def test_native_capture_subscribes_once_and_preserves_measured_carrier(
+def test_compatibility_adapter_is_offered_only_for_unserved_supported_hardware(
     monkeypatch,
 ) -> None:
-    unsubscribed: list[bool] = []
-
-    def subscribe(hass, receiver, callback):
-        assert receiver == "receiver-uuid"
-        asyncio.get_running_loop().call_soon(
-            callback,
-            InfraredReceivedSignal([9000, -4500, 560, -1690], 40_000),
-        )
-        return lambda: unsubscribed.append(True)
-
+    candidates = {
+        "already-core": {"ieee": "00:11"},
+        "already-configured": {"ieee": "00:22"},
+        "needs-provider": {"ieee": "00:33"},
+    }
     monkeypatch.setattr(
-        "custom_components.imprint_refinery.hardware.infrared.async_subscribe_receiver",
-        subscribe,
+        "custom_components.imprint_refinery.hardware.async_discover_zha_adapter_candidates",
+        lambda hass: _async_value(candidates),
     )
 
-    signal, carrier_source = asyncio.run(
-        InfraredHardware(object()).capture(
-            {
-                "transport": "home_assistant_ir",
-                "receiver_entity_id": "receiver-uuid",
-            },
-            timeout=1,
-            poll_interval=1,
+    available = asyncio.run(
+        async_compatibility_adapter_available(
+            object(),
+            configured_emitter_ids={"0022"},
+            core_infrared_device_ids={"already-core"},
+        )
+    )
+    unavailable = asyncio.run(
+        async_compatibility_adapter_available(
+            object(),
+            configured_emitter_ids={"0022", "0033"},
+            core_infrared_device_ids={"already-core"},
         )
     )
 
-    assert signal == IRSignal([9000, 4500, 560, 1690], 40_000)
-    assert carrier_source == "measured"
-    assert unsubscribed == [True]
+    assert available is True
+    assert unavailable is False
+
+
+async def _async_value(value):
+    return value

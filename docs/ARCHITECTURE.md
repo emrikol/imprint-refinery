@@ -1,136 +1,124 @@
 # Architecture
 
-Imprint Refinery separates signal-domain code from Home Assistant adapters. The
-pure layers can be tested without a running Home Assistant instance; adapters
-own framework lifecycle, persistence, registries, and hardware calls.
+Imprint Refinery separates reusable infrared knowledge, actual controlled
+equipment, and connected hardware.
 
-## Runtime composition
+## Domain model
 
-`async_setup_entry` creates one domain runtime containing:
-
-- `SignalLibraryStore`: transactional persistence around the pure library;
-- `ActivityStatus`: the latest operation snapshot;
-- `InfraredHardware`: routing through Home Assistant infrared entities or an
-  optional compatibility bridge;
-- `SignalQueue`: bounded, ordered queues keyed by emitter;
-- `GuidedCatalogSessionManager`: temporary explicit discovery sessions.
-
-The panel RPC layer, public send action, and entity platforms share those
-objects. Unloading the final entry cancels capture tasks, closes queued work,
-unregisters the public action, and removes the sidebar panel.
-
-## Library
-
-`library.py` owns validation and mutation of the versioned
-`imprint_refinery.library` document. It has no Home Assistant imports.
-`storage.py` takes a deep copy before each mutation, saves through Home
-Assistant's `Store`, emits one registry-updated signal after a successful
-write, and restores the copy if the operation fails.
-
-The hierarchy is:
+The version 3 library has two top-level collections:
 
 ```text
-emitter records
-locations
-  appliances
-    commands
-      immutable revisions
+remote_profiles
+  commands
+    immutable revisions
+
+appliances
+  remote_profile_id
+  infrared_emitter_ref
+  preferred_platform
 ```
 
-The product vocabulary is defined once in `product_spec.py`. The persisted
-document is an implementation detail; the panel uses validated internal action
-names and automations use native Home Assistant entities.
+A remote profile is a reusable command set for a product or remote family. It
+contains no Home Assistant device, entity, Area, or emitter identifiers. An
+appliance is one actual target in the home. Several appliances may reference
+the same remote profile, while each keeps its own name, Area, emitter route,
+Home Assistant device, and entity state.
 
-## Capture and send paths
+Home Assistant's Device and Area Registries are authoritative for appliance
+placement. Moving an appliance between Areas does not change its library ID,
+device identifier, or projected entity IDs.
 
-Native capture subscribes to a Home Assistant receiver for a bounded window.
-Compatibility drivers can implement the same operation for hardware that does
-not expose a receiver entity:
+## Core infrared boundary
+
+Imprint consumes Home Assistant's Core Infrared contract directly:
 
 ```text
-panel RPC → InfraredHardware.capture
-           → Home Assistant receiver subscription
-             or compatibility-driver capture
-           → signal or timeout
-           → always release the subscription/capture mode
+appliance entity
+  → resolve appliance, remote profile, command, and emitter
+  → infrared.async_send_command(...)
+  → Core Infrared emitter entity
 ```
 
-Saved and unsaved sends share the same queue:
+Projected appliance entities inherit `InfraredEmitterConsumerEntity`, so Core
+owns emitter lookup, availability tracking, context propagation, and command
+delivery. The panel uses the same helper for an explicit, session-only test
+emitter.
+
+Learning uses the matching receive contract:
 
 ```text
-panel RPC/entity → SignalQueue.submit
-               → per-emitter FIFO + age/capacity checks
-               → InfraredHardware.send
-               → Home Assistant infrared emitter
-                 or compatibility-driver send
-               → sent_unconfirmed or failure status
+learning session
+  → infrared.async_subscribe_receiver(...)
+  → Core Infrared receiver entity
+  → InfraredReceivedSignal
+  → always unsubscribe on success, timeout, cancellation, or unload
 ```
 
-Different emitters may transmit concurrently. One emitter processes a single
-signal at a time. Queue success means the selected hardware adapter accepted
-the operation; IR has no appliance acknowledgement channel.
+`hardware.py` is read-only live inventory. It enumerates emitters and receivers
+from Core and resolves their current names, availability, Areas, and registry
+links. The library does not mirror this information.
 
-## Signal model
+## Compatibility provider
 
-`ir_formats` converts external representations into `IRSignal`, whose timings
-are positive alternating mark/space durations. The library persists signed raw
-timings plus carrier provenance, never a vendor transport payload. Analysis
-derives frame boundaries, timing clusters, raw bitstream candidates,
-fingerprints, and protocol interpretations without changing the source waveform.
+Hardware that lacks a native Core Infrared provider can use an Imprint config
+subentry. `infrared.py` exposes one standard emitter and receiver entity on the
+existing source hardware device. `zha_bridge.py` contains the vendor-specific
+ZHA commands and serializes transmissions per physical adapter when required.
 
-Protocol recognition is evidence, not truth. A known decoder can add field
-interpretations, while the raw timings and raw bitstream remain available.
-Carrier values retain provenance (`measured`, supplied, or assumed).
-
-Signal Lab edits a frontend draft. It sends only the explicit draft during a
-one-shot test and creates a new command on save; the source revision is never
-overwritten in place. Capture-relative smoothing averages timing clusters in
-that draft. Protocol rebuilds are separate, explicit previews produced by a
-canonical encoder attached to the selected decoder interpretation; they update
-both waveform and carrier only after the user applies the preview.
+No Imprint wrapper hardware device, capability sensor, global activity sensor,
+or application-wide send queue sits above Core Infrared.
 
 ## Entity projection
 
-`entity_projection.py` converts library records into immutable
-`EntityBlueprint` values. `ProjectionController` diffs blueprints on the
-registry-updated signal and asks each platform to add or remove only the
-affected entities.
+`entity_projection.py` derives immutable blueprints from appliances and their
+assigned remote profiles. Depending on command roles, the primary projection
+is a standard `remote`, `media_player`, or `switch`; unrepresented commands are
+standard `button` entities.
 
-Capabilities come from explicit command roles. IDs and display names are not
-parsed for behavior. `auto` chooses the narrowest useful platform; users can
-request `remote`, `media_player`, or `switch` explicitly when its required
-roles exist.
+An incomplete appliance—missing a profile or emitter—keeps its logical Home
+Assistant device but does not project a usable entity. A removed or disabled
+emitter makes only appliances routed through it unavailable. Reassigning an
+emitter recreates the consumer entity with the same unique ID so Core does not
+keep an availability subscription to the old emitter.
 
-Entities resolve a saved command at send time and pass `RawSignalCommand`
-through Home Assistant's infrared helper to the selected emitter. Vendor
-encoding is confined to `zha_drivers.py` for devices that need the optional ZHA
-bridge.
+## Persistence and migration
 
-## Home Assistant boundaries
+`library.py` owns the pure versioned model. `storage.py` wraps each mutation in
+a copy-on-write transaction, saves through Home Assistant's `Store`, and emits
+one projection update after a successful write.
 
-- `frontend_bridge.py`: static assets, sidebar panel, Lovelace resource.
-- `device_bridge.py`: compatibility-bridge device ownership and name
-  synchronization.
-- `config_flow.py`: the hub entry and optional compatibility-bridge subentries.
-- `hardware.py`: native Home Assistant infrared discovery and routing.
-- `zha_bridge.py` / `zha_drivers.py`: optional ZHA bridge behavior and its
-  declarative vendor facts.
-- `services.py`: authenticated panel RPC, validation, workflow orchestration,
-  and the single public entity-targeted send action.
-- `infrared.py`: physical emitter entities.
-- `remote.py`, `media_player.py`, `switch.py`: projected appliances.
-- `button.py`: stateless commands not already represented by a native control.
-- `sensor.py`: diagnostic status and emitter capabilities.
+The v2-to-v3 migration creates one profile and one appliance for every legacy
+location/appliance pair. It preserves the old combined appliance identifier,
+all commands, raw signals, revisions, timestamps, display names, and preferred
+platform. Legacy locations become Home Assistant Area assignments; the
+location hierarchy is not retained in the library. Legacy emitter keys are
+resolved to stable Entity Registry UUIDs where possible.
 
-The frontend calls the authenticated `imprint_refinery/execute` WebSocket
-command. Its operations form an internal UI contract, not a public automation
-API. The frontend does not traverse hardware objects or mutate storage
-directly, and capture, editing, catalog, import, export, and revision operations
-stay out of Home Assistant's action picker.
+## Panel and automations
 
-## Offline catalog
+The frontend uses the authenticated `imprint_refinery/execute` WebSocket
+command for library workflows. These operations are private panel RPC, not
+public Home Assistant actions.
 
-The catalog is built ahead of time into a deterministic, checksummed artifact.
-Runtime search and matching read that local artifact. Guided discovery stores
-ephemeral session state and requires the user to initiate and answer every
-candidate test.
+The panel URL is the source of truth for stable workspace navigation. Appliance
+and remote-profile selections use path segments; command detail routes also
+record the open Inspector tab. Signal Lab routes record the source profile,
+command, edit/compare view, and active representation tab. Reload and browser
+Back/Forward restore those states without transmitting a signal. Draft timing
+values, selections, zoom, dialogs, and other transient editing state remain
+in memory and are deliberately excluded from shareable URLs.
+
+Automations use standard projected entity actions: normally
+`remote.send_command`, with native `media_player`, `switch`, or `button.press`
+actions where those semantics fit. Imprint registers no public send action and
+no custom device automation.
+
+## Signal model
+
+The library stores hardware-neutral alternating mark/space timings with
+carrier provenance. `RawSignalCommand` is the minimal concrete
+`infrared_protocols.commands.Command` adapter used at the Core boundary.
+Import/export, lossless storage, structural analysis, recognition, and formats
+not supplied by `infrared-protocols` remain Imprint responsibilities. Local
+waveform generators are retained only where the installed upstream library
+does not provide an equivalent encoder.

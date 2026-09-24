@@ -65,7 +65,12 @@ def endpoint_maps(proxy: Any) -> list[Mapping[Any, Any]]:
     ]
 
 
-def discover_zha_driver(proxy: Any) -> tuple[str, int, int] | None:
+def discover_zha_driver(
+    proxy: Any,
+    *,
+    manufacturer: str | None = None,
+    model: str | None = None,
+) -> tuple[str, int, int] | None:
     """Detect a registered bridge driver from advertised endpoint clusters."""
     maps = endpoint_maps(proxy)
     if not maps:
@@ -73,7 +78,11 @@ def discover_zha_driver(proxy: Any) -> tuple[str, int, int] | None:
             ERROR_ZHA_UNAVAILABLE,
             "ZHA device proxy does not expose endpoints",
         )
-    detected = detect_zha_driver([dict(item) for item in maps])
+    detected = detect_zha_driver(
+        [dict(item) for item in maps],
+        manufacturer=manufacturer,
+        model=model,
+    )
     if detected is None:
         return None
     driver, endpoint_id = detected
@@ -115,19 +124,49 @@ def cluster_from_proxy(
 class _ClusterCommandWaiter:
     """Resolve when one cluster command arrives for one protocol sequence."""
 
-    def __init__(self, command_id: int, sequence: int) -> None:
+    def __init__(self, command_id: int, *, complete_on_end_request: bool) -> None:
         self._command_id = command_id
-        self._sequence = sequence
+        self._complete_on_end_request = complete_on_end_request
+        self._sequence: int | None = None
+        self._message_length: int | None = None
+        self._observed_sequences: set[int] = set()
+        self._observed_end_positions: dict[int, int] = {}
         self.completed = asyncio.get_running_loop().create_future()
+
+    def set_transfer(self, sequence: int, message_length: int | None) -> None:
+        """Bind the waiter after the quirk prepares its transfer."""
+        self._sequence = sequence
+        self._message_length = message_length
+        if self.completed.done():
+            return
+        if sequence in self._observed_sequences or (
+            message_length is not None
+            and self._observed_end_positions.get(sequence, -1) >= message_length
+        ):
+            self.completed.set_result(None)
 
     def cluster_command(self, tsn: int, command_id: int, args: Any) -> None:
         """Handle zigpy's synchronous legacy cluster-listener callback."""
         del tsn
-        if (
-            int(command_id) == self._command_id
-            and int(getattr(args, "seq", -1)) == self._sequence
-            and not self.completed.done()
-        ):
+        if self.completed.done():
+            return
+        command_id = int(command_id)
+        sequence = int(getattr(args, "seq", -1))
+        if command_id == self._command_id:
+            if self._sequence is None:
+                self._observed_sequences.add(sequence)
+            elif sequence == self._sequence:
+                self.completed.set_result(None)
+            return
+        if not self._complete_on_end_request or command_id != 0x02:
+            return
+        position = int(getattr(args, "position", -1))
+        if self._sequence is None or self._message_length is None:
+            self._observed_end_positions[sequence] = max(
+                position,
+                self._observed_end_positions.get(sequence, -1),
+            )
+        elif sequence == self._sequence and position >= self._message_length:
             self.completed.set_result(None)
 
 
@@ -136,6 +175,7 @@ class ZhaBridge:
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
+        self._send_locks: dict[str, asyncio.Lock] = {}
 
     @staticmethod
     def driver(emitter: dict[str, Any]) -> ZhaDriver:
@@ -160,6 +200,12 @@ class ZhaBridge:
         )
 
     async def send(self, emitter: dict[str, Any], signal: IRSignal) -> None:
+        """Serialize sends per physical adapter as required by its protocol."""
+        key = str(emitter["ieee"]).strip().casefold()
+        async with self._send_locks.setdefault(key, asyncio.Lock()):
+            await self._send_locked(emitter, signal)
+
+    async def _send_locked(self, emitter: dict[str, Any], signal: IRSignal) -> None:
         driver = self.driver(emitter)
         params = {driver.send_parameter: driver.encode(signal)}
         if (
@@ -203,17 +249,9 @@ class ZhaBridge:
             ieee=emitter["ieee"],
         )
         protocol_device = getattr(getattr(control, "endpoint", None), "device", None)
-        try:
-            expected_sequence = (int(protocol_device.seq) + 1) % 0x10000
-        except (AttributeError, TypeError, ValueError) as error:
-            raise ImprintRefineryError(
-                ERROR_SEND_FAILED,
-                "ZHA IR driver does not expose a transmission sequence",
-            ) from error
-
         waiter = _ClusterCommandWaiter(
             int(driver.send_completion_command),
-            expected_sequence,
+            complete_on_end_request=driver.send_completion_on_end_request,
         )
         completion.add_listener(waiter)
         try:
@@ -224,11 +262,24 @@ class ZhaBridge:
                     ERROR_SEND_FAILED,
                     f"ZHA cluster command {driver.send_command} failed: {error}",
                 ) from error
-            if int(protocol_device.seq) != expected_sequence:
+            try:
+                expected_sequence = int(protocol_device.seq)
+            except (AttributeError, TypeError, ValueError) as error:
                 raise ImprintRefineryError(
                     ERROR_SEND_FAILED,
-                    "ZHA IR transmission sequence changed unexpectedly",
-                )
+                    "ZHA IR driver does not expose a transmission sequence",
+                ) from error
+            message_length = None
+            if driver.send_completion_on_end_request:
+                pending = getattr(protocol_device, "ir_msg_to_send", {})
+                message = pending.get(expected_sequence)
+                if not isinstance(message, str):
+                    raise ImprintRefineryError(
+                        ERROR_SEND_FAILED,
+                        "ZHA IR driver did not retain its pending transmission",
+                    )
+                message_length = len(message)
+            waiter.set_transfer(expected_sequence, message_length)
             try:
                 await asyncio.wait_for(
                     waiter.completed,

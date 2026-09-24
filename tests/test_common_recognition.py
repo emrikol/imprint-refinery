@@ -29,6 +29,26 @@ def _parsed_signal(
 
 
 class CommonRecognitionTests(unittest.TestCase):
+    def test_equivalent_decoder_rebuilds_collapse_to_one_alignment(self) -> None:
+        analysis = ir_formats.analyze_signal(
+            _parsed_signal("NEC", 0, 94),
+            carrier_source="assumed",
+        )
+
+        candidates = analysis["protocol_candidates"]
+        self.assertGreaterEqual(len(candidates), 3)
+        self.assertEqual(len(analysis["protocol_rebuilds"]), 1)
+        self.assertEqual(analysis["protocol_rebuilds"][0]["protocol"], "NEC")
+        self.assertEqual(analysis["protocol_rebuilds"][0]["address"], 0)
+        self.assertEqual(
+            analysis["protocol_rebuilds"][0]["equivalent_interpretation_count"],
+            len(candidates),
+        )
+        self.assertEqual(
+            {candidate.get("rebuild_id") for candidate in candidates},
+            {analysis["protocol_rebuilds"][0]["id"]},
+        )
+
     def test_nec_exposes_binary_payload_in_transmission_order(self) -> None:
         signal = _parsed_signal(address=0x10, command=0x20)
 

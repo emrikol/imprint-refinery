@@ -48,35 +48,10 @@ const sircAnalysis = {
   protocol_candidates: [{ protocol: "SIRC", evidence_class: "likely", address: 0, command: 0, bits: 12, reconstructable: true, rebuild_id: "fixture-sirc-rebuild" }],
   protocol_rebuilds: [{ id: "fixture-sirc-rebuild", candidate_id: "fixture-sirc", protocol: "SIRC", evidence_class: "likely", carrier_frequency: 40000, carrier_changed: true, timing_count: sircCanonical.length, changed_timings: sircCanonical.length - sircFrame.length, duration_delta_us: 90000, address: 0, command: 0, bits: 12 }],
 };
-const singleFrameTimings = [9000, 4500, ...binaryPayload.value.split("").flatMap(bit => [560, bit === "1" ? 1690 : 560]), 560];
-const singleFrameAnalysis = {
-  ...analysis,
-  pulse_count: singleFrameTimings.length,
-  total_duration_us: singleFrameTimings.reduce((sum, value) => sum + value, 0),
-  frame_count: 1,
-  unique_frame_count: 1,
-  repeated_pattern: false,
-  all_frames_equivalent: false,
-  repeated_frame_count: 0,
-  repeat_count: 0,
-  required_repeats: 0,
-  minimum_frame_count: 1,
-  repeat_requirement_met: true,
-  repeat_style: "none",
-  frames: [{ index: 0, start_timing: 0, end_timing: singleFrameTimings.length, pulse_count: singleFrameTimings.length, duration_us: singleFrameTimings.reduce((sum, value) => sum + value, 0), group: 0 }],
-  frame_roles: [{ frame: 0, role: "intro", kind: "full" }],
-  single_press_candidate: undefined,
-};
 const command = {
   name: "Power", code: "CygjlBEwAjACMAKaBg==",
   format: "zosung_base64", icon: "mdi:power", role: "power_toggle",
   current_revision: 4, revision_count: 4, signal, analysis, source: { name: "Learned locally" },
-};
-const singleFrameCommand = {
-  ...command,
-  name: "Power on",
-  signal: { ...signal, timings: singleFrameTimings },
-  analysis: singleFrameAnalysis,
 };
 const convertedValues = {
   pronto: "0000 006D 0022 0000 0156 00AB 0015 0015 0015 0040 0015 0015 0015 0040",
@@ -87,42 +62,80 @@ const convertedValues = {
   raw_unsigned: "9000 4500 560 560 560 1690",
 };
 const commandVariant = (name, icon, role) => ({ ...command, name, icon, role, current_revision: 1, revision_count: 1 });
-const { protocol_rebuilds: _legacyMissingRebuilds, ...staleAnalysis } = analysis;
-const unassignedCommand = {
-  ...command,
-  name: "Lamp on",
-  home_assistant: { entity_id: "button.unsorted_remote_lamp_on", platform: "button" },
-  source: { type: "single_press_optimization" },
-  analysis: { ...analysis, evidence_class: "ambiguous", confidence: "ambiguous", warnings: ["ambiguous_protocol_candidates", "ambiguous_repeat_semantics"] },
-};
-const registry = {
-  emitters: [{ key: "demo", name: "Living room emitter", entity_id: "infrared.demo", enabled: true, available: true, can_capture: true }],
-  locations: {
-    living_room: { name: "Living room", appliances: {
-      television: { name: "Television", appliance_type: "media_player", emitter_id: "demo", home_assistant: { entity_id: "media_player.television", platform: "media_player", device_id: "fixture-tv", device_url: "/config/devices/device/fixture-tv" }, commands: {
+const workspaceRegistry = {
+  remote_profiles: {
+    silkycasters_rgbw: {
+      name: "Silkycasters RGBW",
+      appliance_type: "light",
+      dependent_appliance_ids: ["living_room_sconce_1", "living_room_sconce_2"],
+      commands: {
         power: command,
-        volume_up: { ...commandVariant("Volume up", "mdi:volume-plus", "volume_up"), analysis: staleAnalysis },
+        warm_white: commandVariant("Warm white", "mdi:palette", "custom"),
+        blue: commandVariant("Blue", "mdi:palette", "custom"),
+        timer_1h: commandVariant("Timer: 1h", "mdi:timer-outline", "custom"),
+      },
+    },
+    television_remote: {
+      name: "Example television remote",
+      appliance_type: "media_player",
+      dependent_appliance_ids: ["living_room_tv"],
+      commands: {
+        power: command,
+        volume_up: commandVariant("Volume up", "mdi:volume-plus", "volume_up"),
         volume_down: commandVariant("Volume down", "mdi:volume-minus", "volume_down"),
-        mute: commandVariant("Mute", "mdi:volume-mute", "mute_toggle", false),
-        input: commandVariant("Input", "mdi:video-input-hdmi", "source"),
-      }},
-      receiver: { name: "Receiver", appliance_type: "media_player", emitter_id: "demo", commands: {
-        receiver_power: commandVariant("Power", "mdi:power", "power_toggle"),
-        receiver_volume_up: commandVariant("Volume up", "mdi:volume-plus", "volume_up"),
-        receiver_volume_down: commandVariant("Volume down", "mdi:volume-minus", "volume_down"),
-      }},
-    }},
-    bedroom: { name: "Bedroom", appliances: {
-      fan: { name: "Fan", appliance_type: "fan", emitter_id: "demo", commands: {
-        fan_power: commandVariant("Power", "mdi:power", "power_toggle"),
-        fan_speed: commandVariant("Speed", "mdi:fan", "speed"),
-      }},
-    }},
+      },
+    },
+    spare_remote: {
+      name: "Spare remote",
+      appliance_type: "generic",
+      dependent_appliance_ids: [],
+      commands: {},
+    },
   },
-};
-const unassignedRegistry = {
-  emitters: [{ key: "demo", name: "Demo emitter", entity_id: "infrared.demo", enabled: true, available: true, can_capture: true }],
-  locations: { unsorted: { name: "Unsorted", appliances: { remote: { name: "Unsorted remote", appliance_type: "generic", emitter_id: "demo", home_assistant: { entity_id: "remote.unsorted_remote", platform: "remote", device_id: "fixture-remote", device_url: "/config/devices/device/fixture-remote" }, commands: { lamp_on: unassignedCommand } } } } },
+  appliances: {
+    living_room_sconce_1: {
+      name: "Sconce 1",
+      remote_profile_id: "silkycasters_rgbw",
+      infrared_emitter_ref: "fixture-emitter-one",
+      preferred_platform: "remote",
+      route_status: "ready",
+      area: { area_id: "living-room", name: "Living room" },
+      home_assistant: { entity_id: "remote.sconce_1", available: true, platform: "remote", device_id: "fixture-sconce-1", device_url: "/config/devices/device/fixture-sconce-1" },
+    },
+    living_room_sconce_2: {
+      name: "Sconce 2",
+      remote_profile_id: "silkycasters_rgbw",
+      infrared_emitter_ref: "fixture-emitter-two",
+      preferred_platform: "remote",
+      route_status: "unavailable",
+      area: { area_id: "living-room", name: "Living room" },
+      home_assistant: { entity_id: "remote.sconce_2", available: true, platform: "remote", device_id: "fixture-sconce-2", device_url: "/config/devices/device/fixture-sconce-2" },
+    },
+    living_room_tv: {
+      name: "Television",
+      remote_profile_id: "television_remote",
+      infrared_emitter_ref: "fixture-emitter-one",
+      preferred_platform: "media_player",
+      route_status: "ready",
+      area: { area_id: "living-room", name: "Living room" },
+      home_assistant: { entity_id: "media_player.television", available: false, platform: "media_player", device_id: "fixture-tv", device_url: "/config/devices/device/fixture-tv" },
+    },
+  },
+  infrared_hardware: {
+    compatibility_adapter_available: false,
+    emitters: [
+      { ref: "fixture-emitter-one", entity_id: "infrared.living_room", name: "Living room IR", available: true, last_activity: "2000-01-01T00:00:00Z", platform: "imprint_refinery", compatibility_adapter: true, device_id: "fixture-ir-1", device_name: "Living room IR hardware", device_url: "/config/devices/device/fixture-ir-1", entity_url: "/config/entities/entity/fixture-emitter-one", area_name: "Living room" },
+      { ref: "fixture-emitter-two", entity_id: "infrared.bedroom", name: "Bedroom IR", available: false, last_activity: null, platform: "esphome", compatibility_adapter: false, device_id: "fixture-ir-2", device_name: "Bedroom IR hardware", device_url: "/config/devices/device/fixture-ir-2", entity_url: "/config/entities/entity/fixture-emitter-two", area_name: "Bedroom" },
+    ],
+    receivers: [
+      { ref: "fixture-receiver-one", entity_id: "infrared.living_room_receiver", name: "Living room receiver", available: true, last_activity: null, platform: "imprint_refinery", compatibility_adapter: true, device_id: "fixture-ir-1", device_name: "Living room IR hardware", device_url: "/config/devices/device/fixture-ir-1", entity_url: "/config/entities/entity/fixture-receiver-one", area_name: "Living room" },
+      { ref: "fixture-receiver-two", entity_id: "infrared.bedroom_receiver", name: "Bedroom receiver", available: true, last_activity: null, platform: "esphome", compatibility_adapter: false, device_id: "fixture-ir-2", device_name: "Bedroom IR hardware", device_url: "/config/devices/device/fixture-ir-2", entity_url: "/config/entities/entity/fixture-receiver-two", area_name: "Bedroom" },
+    ],
+  },
+  areas: [
+    { area_id: "living-room", name: "Living room" },
+    { area_id: "bedroom", name: "Bedroom" },
+  ],
 };
 const history = {
   current_revision: 4,
@@ -157,6 +170,9 @@ const candidate = { candidate_id: "demo-power", command: catalogProfile.commands
 const fixtureParams = new URLSearchParams(location.search);
 const fixtureView = fixtureParams.get("view") || "library";
 const fixtureTheme = fixtureParams.get("theme") || "dark";
+const fixtureHostWidth = Number(fixtureParams.get("hostWidth") || 0);
+const fixtureTextScale = Number(fixtureParams.get("textScale") || 1);
+const fixturePresentation = fixtureParams.get("presentation") || "panel";
 if (fixtureTheme === "light") {
   const root = document.documentElement.style;
   root.colorScheme = "light";
@@ -168,14 +184,41 @@ if (fixtureTheme === "light") {
   root.setProperty("--text-primary-color", "#07161a");
   root.setProperty("--divider-color", "#d5dbe2");
   root.setProperty("--primary-color", "#087f9d");
+  root.setProperty("--success-color", "#18794e");
+  root.setProperty("--warning-color", "#8a5a00");
+  root.setProperty("--error-color", "#c62828");
+  root.setProperty("--disabled-color", "#687483");
+}
+if (Number.isFinite(fixtureTextScale) && fixtureTextScale > 0) {
+  document.documentElement.style.fontSize = `${fixtureTextScale * 100}%`;
 }
 const calls = [];
-const fixtureRegistry = fixtureView === "empty" ? { ...registry, locations: {} }
-  : fixtureView === "offline" ? { ...registry, emitters: registry.emitters.map(item => ({ ...item, available: false })) }
-  : fixtureView === "no-blaster" ? { ...registry, emitters: [] }
-  : fixtureView === "multiple-blasters" ? { ...registry, emitters: [...registry.emitters, { key: "bedroom", name: "Bedroom emitter", entity_id: "infrared.bedroom", enabled: true, available: true, can_capture: true }] }
-  : fixtureView === "library-unassigned" ? unassignedRegistry
-  : registry;
+const fixtureRegistry = fixtureView === "empty" ? { ...workspaceRegistry, remote_profiles: {}, appliances: {} }
+  : fixtureView === "unconfigured-appliance" ? {
+      ...workspaceRegistry,
+      appliances: {
+        unconfigured_appliance: {
+          name: "Unconfigured appliance",
+          remote_profile_id: "",
+          infrared_emitter_ref: "",
+          preferred_platform: "remote",
+          route_status: "unassigned",
+          area: { area_id: "living-room", name: "Living room" },
+          home_assistant: {
+            entity_id: "remote.unconfigured_appliance",
+            available: false,
+            platform: "remote",
+            device_id: "fixture-unconfigured-appliance",
+            device_url: "/config/devices/device/fixture-unconfigured-appliance",
+          },
+        },
+      },
+    }
+  : fixtureView === "offline" ? { ...workspaceRegistry, infrared_hardware: { ...workspaceRegistry.infrared_hardware, emitters: workspaceRegistry.infrared_hardware.emitters.map(item => ({ ...item, available: false })) } }
+  : fixtureView === "no-blaster" ? { ...workspaceRegistry, infrared_hardware: { ...workspaceRegistry.infrared_hardware, emitters: [] } }
+  : ["no-receiver", "no-receiver-dialog"].includes(fixtureView) ? { ...workspaceRegistry, infrared_hardware: { ...workspaceRegistry.infrared_hardware, receivers: [] } }
+  : ["compatibility-adapter", "compatibility-adapter-hardware"].includes(fixtureView) ? { ...workspaceRegistry, infrared_hardware: { ...workspaceRegistry.infrared_hardware, compatibility_adapter_available: true } }
+  : workspaceRegistry;
 const hass = {
   locale: { language: "en" },
   services: { imprint_refinery: { cancel_capture: {} } },
@@ -195,10 +238,26 @@ const hass = {
       return { response: fixtureRegistry };
     }
     if (service === "command_history") return { response: history };
+    if (service === "inspect_import") return { response: {
+      format: data.format === "auto" ? "flipper" : data.format,
+      command_count: 1,
+      commands: [{ command_id: "imported_power", name: "Imported power", code: command.code, format: "raw_signed", signal, analysis, source: { type: "import", format: data.format } }],
+      unsupported_count: 0,
+      unsupported_commands: [],
+    } };
+    if (service === "export_backup") return { response: {
+      schema: "imprint_refinery.backup",
+      version: 2,
+      scope: data.remote_profile_id ? "remote_profile" : "library",
+      history: "full",
+      command_count: 1,
+      remote_profiles: { silkycasters_rgbw: { name: "Silkycasters RGBW", appliance_type: "light", commands: { power: command } } },
+      appliances: data.remote_profile_id ? {} : { sconce_one: { name: "Sconce 1", remote_profile_id: "silkycasters_rgbw", preferred_platform: "remote", area_name: "Living room" } },
+    } };
     if (service === "capture_signal") {
       if (fixtureView === "learn-waiting") return new Promise(() => {});
       if (fixtureView === "learn-error") throw new Error("No IR code was received before the capture window ended");
-      return { response: { code: command.code } };
+      return { response: { code: command.code, format: "raw_signed", signal } };
     }
     if (service === "analyze_signal") {
       const learnedAnalysis = fixtureView === "learn-review" ? { ...analysis, fingerprints: { normalized_50us: "fixture-new-fingerprint", exact: "fixture-new-exact" } } : analysis;
@@ -213,27 +272,100 @@ const hass = {
     if (service === "rebuild_signal") return { response: { format: "raw_signed", code: command.code, signal, analysis, rebuild: analysis.protocol_rebuilds[0] } };
     if (service === "catalog_search") return { response: { catalog: catalogMeta, profiles: [catalogSummary] } };
     if (service === "catalog_profile") return { response: catalogProfile };
+    if (service === "create_remote_profile") {
+      fixtureRegistry.remote_profiles[data.remote_profile_id] = {
+        name: data.name,
+        appliance_type: data.appliance_type,
+        dependent_appliance_ids: [],
+        commands: {},
+      };
+      return { response: { status: "saved" } };
+    }
+    if (service === "store_command") {
+      const profile = fixtureRegistry.remote_profiles[data.remote_profile_id];
+      if (profile) profile.commands[data.command_id] = { ...command, ...data };
+      return { response: { status: "saved" } };
+    }
+    if (service === "duplicate_command") {
+      const source = fixtureRegistry.remote_profiles[data.remote_profile_id]?.commands?.[data.command_id];
+      const target = fixtureRegistry.remote_profiles[data.target_remote_profile_id];
+      if (source && target) {
+        target.commands[data.target_command_id] = {
+          ...structuredClone(source),
+          name: data.name,
+          current_revision: 1,
+          revision_count: 1,
+        };
+      }
+      return { response: { status: "duplicated" } };
+    }
+    if (service === "update_command") {
+      const profile = fixtureRegistry.remote_profiles[data.remote_profile_id];
+      const current = profile?.commands?.[data.command_id];
+      if (current) {
+        profile.commands[data.command_id] = {
+          ...current,
+          name: data.name,
+          icon: data.icon,
+          role: data.role,
+        };
+      }
+      return { response: { status: "saved" } };
+    }
+    if (service === "move_command") {
+      const source = fixtureRegistry.remote_profiles[data.remote_profile_id];
+      const target = fixtureRegistry.remote_profiles[data.target_remote_profile_id];
+      const current = source?.commands?.[data.command_id];
+      if (current && target && !target.commands[data.command_id]) {
+        target.commands[data.command_id] = current;
+        delete source.commands[data.command_id];
+      }
+      return { response: { status: "moved" } };
+    }
+    if (service === "update_appliance") {
+      const appliance = fixtureRegistry.appliances[data.appliance_id];
+      if (appliance) Object.assign(appliance, data);
+      return { response: { status: "saved" } };
+    }
     if (service === "catalog_guided_candidates") return { response: { catalog: catalogMeta, candidates: [candidate] } };
-    if (service === "catalog_guided_start") return { response: { session: { session_id: "fixture-guided", status: "active", pending_test: false, candidates: [candidate], progress: { position: 1, total: 1 }, current_candidate: candidate, prompt: "Power" } } };
-    if (service === "catalog_guided_test") return { response: { session: { session_id: "fixture-guided", status: "active", pending_test: true, candidates: [candidate], progress: { position: 1, total: 1 }, current_candidate: candidate, prompt: "Power" } } };
-    if (service === "catalog_guided_answer") return { response: { session: { session_id: "fixture-guided", status: "completed", pause_reason: "worked", pending_test: false, candidates: [{ ...candidate, confirmed: true }], progress: { position: 1, total: 1 }, current_candidate: candidate, confirmed_candidate: candidate } } };
+    if (service === "catalog_guided_start") return { response: { session: { session_id: "fixture-guided", status: "active", pause_reason: null, pending_test: null, candidates: [candidate], progress: { position: 1, total: 1 }, current_candidate: candidate, remaining_delay_seconds: 0 } } };
+    if (service === "catalog_guided_test") return { response: { session: { session_id: "fixture-guided", status: "active", pause_reason: null, pending_test: { candidate_id: candidate.candidate_id }, candidates: [candidate], progress: { position: 1, total: 1 }, current_candidate: candidate, remaining_delay_seconds: 5 } } };
+    if (service === "catalog_guided_answer") {
+      if (data.result === "worked") return { response: { session: { session_id: "fixture-guided", status: "paused", pause_reason: "worked", pending_test: null, candidates: [candidate], progress: { position: 1, total: 1 }, current_candidate: candidate, remaining_delay_seconds: 5 } } };
+      return { response: { session: { session_id: "fixture-guided", status: "completed", pause_reason: null, pending_test: null, candidates: [candidate], progress: { position: 1, total: 1 }, current_candidate: null, remaining_delay_seconds: 5 } } };
+    }
+    if (service === "catalog_guided_control") {
+      if (data.session_action === "cancel") return { response: { session_id: "fixture-guided", status: "cancelled", pause_reason: null, pending_test: null, current_candidate: candidate, candidates: [candidate], progress: { position: 1, total: 1 }, remaining_delay_seconds: 0 } };
+      return { response: { session_id: "fixture-guided", status: "active", pause_reason: null, pending_test: null, current_candidate: candidate, candidates: [candidate], progress: { position: 1, total: 1 }, remaining_delay_seconds: 0 } };
+    }
     return { response: {} };
   },
 };
 
 await customElements.whenDefined("imprint-refinery-card");
 const preview = document.getElementById("preview");
+if (Number.isFinite(fixtureHostWidth) && fixtureHostWidth > 0) {
+  preview.style.inlineSize = `${fixtureHostWidth}px`;
+  preview.style.maxInlineSize = "100%";
+  preview.style.marginInline = "auto";
+}
 const mountComponent = async (tag, properties) => {
+  if (!customElements.get(tag)) {
+    throw new Error(`Fixture requested undefined custom element: ${tag}`);
+  }
   preview.className = "fixture-shell";
   preview.innerHTML = '<div class="fixture-title">Imprint Refinery</div>';
   const element = document.createElement(tag);
   Object.assign(element, properties);
   preview.append(element);
   await element.updateComplete;
+  if (!element.shadowRoot) {
+    throw new Error(`Fixture custom element did not render a shadow root: ${tag}`);
+  }
   return element;
 };
 const lab = {
-  locId: "living_room", applianceId: "television", cmdId: "power", sourceName: "Power", sourceRevision: 4,
+  remoteProfileId: "silkycasters_rgbw", commandId: "power", sourceName: "Power", sourceRevision: 4,
   original: [...timings], timings: timings.map((value, index) => index === 5 ? value + 30 : value),
   carrierFrequency: 38000, originalCarrierFrequency: 38000, carrierSource: "assumed",
   sourceAnalysis: analysis, draftAnalysis: analysis, analysisPending: false, undo: [], redo: [],
@@ -270,37 +402,50 @@ const inferredBinaryAnalysis = {
   },
 };
 
-const importPreview = {
-  format: "flipper",
-  scope: "appliance",
-  commands: [
-    { command_id: "power", name: "Power", code: command.code, compatible: true, loss_report: { lossless: true } },
-    { command_id: "volume_up", name: "Volume up", code: command.code, compatible: true, loss_report: { lossless: false } },
-    { command_id: "unsupported", name: "Bluetooth pairing", compatible: false },
-  ],
-  unsupported_count: 1,
-  loss_report: { lossless: false, warnings: ["One imported representation omits carrier metadata."] },
+const retiredFixtureViews = new Set([
+  "catalog", "catalog-empty", "guided", "guided-paused", "confirm", "profile",
+  "catalog-choices", "catalog-import", "catalog-import-preview", "catalog-error",
+  "learn-preparing", "learn-duplicate", "learn-optimized", "inspector",
+  "inspector-signal", "inspector-single-frame", "inspector-code",
+  "inspector-history", "inspector-malformed", "inspector-offline",
+  "inspector-ambiguous",
+  "no-results",
+  "dialog-locations", "dialog-add-appliance", "dialog-rename-command",
+  "dialog-delete-command", "dialog-delete-appliance",
+  "dialog-revision-restore", "dialog-command-move",
+  "dialog-command-duplicate", "dialog-command-role", "dialog-command-icon",
+  "dialog-device-move", "dialog-device-settings",
+]);
+
+const queryAllDeep = (root, selector) => {
+  const matches = [...(root.querySelectorAll?.(selector) || [])];
+  const shadowHosts = [
+    ...(root instanceof Element && root.shadowRoot ? [root] : []),
+    ...(root.querySelectorAll?.("*") || []),
+  ];
+  for (const host of shadowHosts) {
+    if (host.shadowRoot) matches.push(...queryAllDeep(host.shadowRoot, selector));
+  }
+  return matches;
 };
 
-if (["catalog", "catalog-empty", "guided", "guided-paused", "confirm", "profile", "catalog-choices", "catalog-import", "catalog-import-preview", "catalog-error"].includes(fixtureView)) {
-  const catalogState = fixtureView === "catalog" ? { mode: "find", category: "tv", brand: "Vizio", searched: true, results: [catalogSummary], catalog: catalogMeta }
-    : fixtureView === "catalog-empty" ? { mode: "find", category: "tv", brand: "Missing brand", searched: true, results: [], catalog: catalogMeta }
-    : fixtureView === "profile" ? { mode: "find", selectedProfile: catalogProfile, catalog: catalogMeta }
-    : fixtureView === "guided" ? { mode: "match", category: "tv", brand: "Vizio TV", catalog: catalogMeta, candidates: [candidate], guidedSession: { session_id: "fixture-session", status: "active", pending_test: true, candidates: [candidate], progress: { position: 1, total: 1 }, current_candidate: candidate, prompt: "Power", instruction: "We’ll send one Power command. If the appliance responds, stop here and tell us it worked." } }
-    : fixtureView === "guided-paused" ? { mode: "match", category: "tv", brand: "Vizio TV", catalog: catalogMeta, candidates: [candidate], guidedSession: { session_id: "fixture-session", status: "paused", pending_test: false, candidates: [candidate], progress: { position: 1, total: 3 }, current_candidate: candidate, prompt: "Power", instruction: "Testing is paused. Resume when the appliance is ready." } }
-    : fixtureView === "confirm" ? { mode: "match", category: "tv", brand: "Vizio TV", catalog: catalogMeta, candidates: [{ ...candidate, confirmed: true }], guidedSession: { session_id: "fixture-session", status: "completed", pause_reason: "worked", candidates: [{ ...candidate, confirmed: true }], progress: { position: 1, total: 1 }, current_candidate: candidate } }
-    : fixtureView === "catalog-import-preview" ? { mode: "import", catalog: catalogMeta, preview: importPreview, unsupportedCommands: [{ name: "Bluetooth pairing", source: "Fixture remote", error: "Bluetooth commands cannot be represented as IR." }], lossReport: importPreview.loss_report }
-    : fixtureView === "catalog-error" ? { mode: "find", catalog: catalogMeta, error: "The local catalog could not be opened. Reinstall the integration to restore it." }
-    : fixtureView === "catalog-import" ? { mode: "import", catalog: catalogMeta }
-    : { mode: "choices", catalog: catalogMeta };
-  await mountComponent("imprint-catalog-guided", { catalog: catalogState, registry, emitterName: "Living room emitter", importTargetKey: "living_room||television" });
-} else if (["learn-preparing", "learn-duplicate", "learn-optimized"].includes(fixtureView)) {
-  const step = fixtureView.replace("learn-", "");
-  const learn = { seq: 1, step: step === "preparing" ? "preparing" : "review", locationId: "living_room", applianceId: "television", commandId: "", name: "Power", role: "power_toggle", targetKey: "living_room||television", newApplianceName: "", code: command.code, preview: { format: command.format, code: command.code, signal, analysis }, catalogMatches: [], deadline: Date.now() + 18000,
-    ...(fixtureView === "learn-duplicate" ? { duplicateMatch: { locId: "living_room", applianceId: "television", cmdId: "power", commandName: "Power", applianceName: "Television" } } : {}),
-    ...(fixtureView === "learn-optimized" ? { optimized: true, originalCode: command.code, originalPreview: { format: command.format, code: command.code, signal, analysis } } : {}),
-  };
-  await mountComponent("imprint-learn-flow", { learn, registry, remaining: 18, emitterName: "Living room emitter", emitterReady: true });
+const clickButton = async (root, label) => {
+  let button;
+  for (let attempt = 0; attempt < 120 && !button; attempt += 1) {
+    button = queryAllDeep(root, "button, [role=button], ha-button, ha-icon-button, ha-tab-group-tab, ha-dropdown-item").find(
+      (item) => item.textContent?.trim() === label || item.label === label || item.getAttribute?.("aria-label") === label,
+    );
+    if (!button) await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if (!button) throw new Error(`Fixture action "${label}" was not found.`);
+  button.click();
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+};
+
+if (retiredFixtureViews.has(fixtureView)) {
+  throw new Error(
+    `Fixture view "${fixtureView}" targets a retired component. Use a current workspace fixture instead.`,
+  );
 } else if (["lab", "lab-decoded", "lab-inferred-binary", "lab-compare", "lab-code", "lab-custom", "lab-invalid", "lab-offline", "lab-preview", "lab-leave", "lab-repeats", "lab-rebuildable-sirc"].includes(fixtureView)) {
   const fixtureLab = {
     ...lab,
@@ -308,12 +453,12 @@ if (["catalog", "catalog-empty", "guided", "guided-paused", "confirm", "profile"
     ...(fixtureView === "lab-repeats" ? { original: [...repeatedTimings], timings: [...repeatedTimings], sourceAnalysis: repeatedAnalysis, draftAnalysis: repeatedAnalysis, frameRoles: ["intro", ...Array(22).fill("repeat")], originalFrameRoles: ["intro", ...Array(22).fill("repeat")], dirty: false, selected: 0, selectionStart: 0, selectionEnd: 0, cursors: [0, repeatedTimings.reduce((sum, value) => sum + value, 0)] } : {}),
     ...(fixtureView === "lab-inferred-binary" ? { sourceAnalysis: inferredBinaryAnalysis, draftAnalysis: inferredBinaryAnalysis, dirty: false } : {}),
     ...(fixtureView === "lab-rebuildable-sirc" ? { original: [...sircFrame], timings: [...sircFrame], carrierFrequency: 38000, originalCarrierFrequency: 38000, sourceAnalysis: sircAnalysis, draftAnalysis: sircAnalysis, dirty: false, selected: 0, selectionStart: 0, selectionEnd: 0, frameRoles: ["intro"], originalFrameRoles: ["intro"], cursors: [0, 45000] } : {}),
-    ...(fixtureView === "lab-custom" ? { custom: true, locId: "unsorted", applianceId: "remote", cmdId: "", sourceName: "New custom signal", sourceRevision: 0, saveName: "", saveId: "", dirty: false } : {}),
+    ...(fixtureView === "lab-custom" ? { custom: true, remoteProfileId: "silkycasters_rgbw", commandId: "", sourceName: "New custom signal", sourceRevision: 0, saveName: "", saveId: "", dirty: false } : {}),
     ...(fixtureView === "lab-invalid" ? { timings: [9000, 0, 560], draftAnalysis: { evidence_class: "unknown", warnings: ["odd_timing_count"] } } : {}),
     ...(fixtureView === "lab-preview" ? { preview: { kind: "Round timings", timings: timings.map(value => Math.round(value / 100) * 100), changed: 12, durationDelta: 80, maxTimingError: 40, frameDelta: 0, roundTripChanges: 0, evidenceClass: "pattern_only", protocol: "NEC", compatible: true, warning: "Review timing drift before applying this transform." } } : {}),
     ...(fixtureView === "lab-leave" ? { leavePrompt: true } : {}),
   };
-  const labElement = await mountComponent("imprint-signal-lab", { lab: fixtureLab, registry, emitterName: "Living room emitter", emitterReady: fixtureView !== "lab-offline", offlineReason: fixtureView === "lab-offline" ? "The selected emitter is unavailable; editing and export remain available." : "", now: Date.now() });
+  const labElement = await mountComponent("imprint-signal-lab", { lab: fixtureLab, registry: workspaceRegistry, emitterName: "Living room emitter", emitterReady: fixtureView !== "lab-offline", offlineReason: fixtureView === "lab-offline" ? "The selected emitter is unavailable; editing and export remain available." : "" });
   labElement.addEventListener("lab-action", event => {
     const detail = event.detail || {};
     if (detail.action === "ui") labElement.lab = { ...labElement.lab, ...(detail.patch || {}) };
@@ -323,7 +468,7 @@ if (["catalog", "catalog-empty", "guided", "guided-paused", "confirm", "profile"
       const isSirc = detail.rebuildId === "fixture-sirc-rebuild";
       const rebuilt = isSirc ? sircCanonical : timings;
       const protocol = isSirc ? "SIRC" : "NEC";
-      labElement.lab = { ...labElement.lab, preview: { kind: `Rebuild as ${protocol}`, timings: [...rebuilt], changed: Math.abs(rebuilt.length - labElement.lab.timings.length) + rebuilt.slice(0, labElement.lab.timings.length).filter((value, index) => value !== labElement.lab.timings[index]).length, durationDelta: rebuilt.reduce((sum, value) => sum + value, 0) - labElement.lab.timings.reduce((sum, value) => sum + value, 0), maxTimingError: 0, frameDelta: isSirc ? 2 : 0, roundTripChanges: 0, evidenceClass: "likely", protocol, compatible: true, carrierFrequency: isSirc ? 40000 : 38000, frameRoles: isSirc ? ["intro", "repeat", "repeat"] : ["intro", "repeat"], description: `Decoded fields were re-encoded with the ${protocol} protocol definition.`, timingBasis: `${protocol} protocol definition`, applyLabel: `Apply ${protocol} rebuild` } };
+      labElement.lab = { ...labElement.lab, preview: { kind: `Align to ${protocol} timing`, timings: [...rebuilt], changed: Math.abs(rebuilt.length - labElement.lab.timings.length) + rebuilt.slice(0, labElement.lab.timings.length).filter((value, index) => value !== labElement.lab.timings[index]).length, durationDelta: rebuilt.reduce((sum, value) => sum + value, 0) - labElement.lab.timings.reduce((sum, value) => sum + value, 0), maxTimingError: 0, frameDelta: isSirc ? 2 : 0, roundTripChanges: 0, evidenceClass: "likely", protocol, compatible: true, carrierFrequency: isSirc ? 40000 : 38000, frameRoles: isSirc ? ["intro", "repeat", "repeat"] : ["intro", "repeat"], description: `The decoded command was re-encoded using ${protocol} standard timing. The protected capture is unchanged.`, timingBasis: `${protocol} standard timing`, applyLabel: `Apply ${protocol} alignment`, protocolAlignment: true, recognitionLabel: `${protocol} · 3 interpretations agree` } };
     }
     if (detail.action === "preview-apply" && Array.isArray(detail.timings)) labElement.lab = { ...labElement.lab, timings: [...detail.timings], carrierFrequency: Number(detail.carrierFrequency || labElement.lab.carrierFrequency), frameRoles: [...(detail.frameRoles || labElement.lab.frameRoles)], preview: undefined, dirty: true };
     if (detail.action === "preview-cancel") labElement.lab = { ...labElement.lab, preview: undefined };
@@ -340,77 +485,90 @@ if (["catalog", "catalog-empty", "guided", "guided-paused", "confirm", "profile"
     labElement.shadowRoot.querySelector('[role="tab"]:first-of-type')?.click();
     await labElement.updateComplete;
   }
-} else if (["inspector", "inspector-signal", "inspector-single-frame", "inspector-code", "inspector-history", "inspector-malformed", "inspector-offline", "inspector-ambiguous"].includes(fixtureView)) {
-  const tab = ["inspector-signal", "inspector-single-frame"].includes(fixtureView) ? "signal" : fixtureView === "inspector-code" ? "code" : fixtureView === "inspector-history" ? "history" : "overview";
-  const singleFrameRegistry = {
-    ...registry,
-    locations: {
-      ...registry.locations,
-      living_room: {
-        ...registry.locations.living_room,
-        appliances: {
-          ...registry.locations.living_room.appliances,
-          television: {
-            ...registry.locations.living_room.appliances.television,
-            commands: { ...registry.locations.living_room.appliances.television.commands, power: singleFrameCommand },
-          },
-        },
-      },
-    },
-  };
-  const inspectorRegistry = fixtureView === "inspector-malformed" ? { ...registry, locations: { ...registry.locations, living_room: { ...registry.locations.living_room, appliances: { ...registry.locations.living_room.appliances, television: { ...registry.locations.living_room.appliances.television, commands: { ...registry.locations.living_room.appliances.television.commands, power: { ...command, code: "", signal: undefined, analysis: { evidence_class: "unknown", warnings: ["malformed_payload"] } } } } } } } } : fixtureView === "inspector-offline" ? { ...registry, emitters: registry.emitters.map(item => ({ ...item, available: false })) } : fixtureView === "inspector-ambiguous" ? unassignedRegistry : fixtureView === "inspector-single-frame" ? singleFrameRegistry : registry;
-  const ambiguous = fixtureView === "inspector-ambiguous";
-  await mountComponent("imprint-library-inspector", { registry: inspectorRegistry, selectedEmitter: "demo", selectedLocation: ambiguous ? "unsorted" : "living_room", selectedAppliance: ambiguous ? "remote" : "television", status: fixtureView === "inspector-offline" ? "unavailable" : "idle", inspector: { locId: ambiguous ? "unsorted" : "living_room", applianceId: ambiguous ? "remote" : "television", cmdId: ambiguous ? "lamp_on" : "power", tab: fixtureView === "inspector-malformed" ? "code" : tab, history, representation: command.format, representations: fixtureView === "inspector-malformed" ? {} : { [command.format]: command.code }, zoom: 1 } });
 } else {
   const card = document.createElement("imprint-refinery-card");
-  card.setConfig({ title: "Imprint Refinery", workspace: true, timeout: 60 });
+  card.setConfig({
+    title: "Imprint Refinery",
+    workspace: fixturePresentation !== "card",
+    timeout: 60,
+  });
   card.hass = hass;
   preview.append(card);
   await card.updateComplete;
-  if (["learn-waiting", "learn-review", "learn-error"].includes(fixtureView)) {
-    await new Promise(resolve => setTimeout(resolve, 0));
-    const workspace = card.shadowRoot?.querySelector("imprint-library-inspector");
-    workspace?.dispatchEvent(new CustomEvent("learn-request", { bubbles: true, composed: true }));
-    await new Promise(resolve => setTimeout(resolve, fixtureView === "learn-review" ? 80 : 20));
-    await card.updateComplete;
+  if (fixturePresentation !== "card" && [
+    "library", "learn-dialog", "learn-waiting", "learn-review", "learn-error",
+    "no-receiver-dialog", "profile-dialog",
+    "custom-signal-dialog", "custom-signal-fallback", "catalog-dialog",
+    "confirmation-dialog", "icon-dialog", "bulk-selection", "backup-dialog",
+    "import-dialog", "command-inspector", "command-edit", "command-duplicate",
+    "signal-lab", "offline", "no-blaster", "no-receiver",
+    "compatibility-adapter",
+  ].includes(fixtureView)) {
+    await clickButton(card, "Remote profiles");
   }
-  if (fixtureView === "no-results") {
-    await new Promise(resolve => setTimeout(resolve, 20));
-    const workspace = card.shadowRoot?.querySelector("imprint-library-inspector");
-    const browser = workspace?.shadowRoot?.querySelector("imprint-library-browser");
-    const search = browser?.shadowRoot?.querySelector('input[type="search"]');
-    if (search) {
-      search.value = "definitely-not-a-saved-command";
-      search.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-      await browser.updateComplete;
+  if (["appliances", "appliance-dialog", "unconfigured-appliance"].includes(fixtureView)) {
+    await clickButton(card, "Appliances");
+    if (fixtureView === "appliance-dialog") {
+      await clickButton(card, "Edit Sconce 1");
     }
   }
-  if (fixtureView.startsWith("dialog-")) {
-    await new Promise(resolve => setTimeout(resolve, 30));
-    const workspace = card.shadowRoot?.querySelector("imprint-library-inspector");
-    const browser = workspace?.shadowRoot?.querySelector("imprint-library-browser");
-    const commandRef = { locId: "living_room", applianceId: "television", cmdId: "power" };
-    if (fixtureView === "dialog-locations") workspace?.dispatchEvent(new CustomEvent("location-add", { bubbles: true, composed: true }));
-    if (fixtureView === "dialog-add-appliance") workspace?.dispatchEvent(new CustomEvent("appliance-create", { detail: {}, bubbles: true, composed: true }));
-    if (fixtureView === "dialog-rename-command") workspace?.dispatchEvent(new CustomEvent("command-rename", { detail: commandRef, bubbles: true, composed: true }));
-    if (fixtureView === "dialog-delete-command") workspace?.dispatchEvent(new CustomEvent("command-delete", { detail: commandRef, bubbles: true, composed: true }));
-    if (fixtureView === "dialog-delete-appliance") workspace?.dispatchEvent(new CustomEvent("appliance-delete", { detail: { locId: "living_room", applianceId: "television", commandCount: 5, name: "Television" }, bubbles: true, composed: true }));
-    if (fixtureView === "dialog-revision-restore") workspace?.dispatchEvent(new CustomEvent("revision-restore", { detail: { revision: 1 }, bubbles: true, composed: true }));
-    const browserAction = (menuLabel, actionLabel) => {
-      const menu = [...(browser?.shadowRoot?.querySelectorAll("summary") || [])].find(item => item.getAttribute("aria-label") === menuLabel);
-      menu?.click();
-      const action = [...(browser?.shadowRoot?.querySelectorAll("button") || [])].find(item => item.textContent?.trim() === actionLabel);
-      action?.click();
-    };
-    if (fixtureView === "dialog-command-move") browserAction("Actions for Power", "Move");
-    if (fixtureView === "dialog-command-duplicate") browserAction("Actions for Power", "Duplicate");
-    if (fixtureView === "dialog-command-role") browserAction("Actions for Power", "Edit role");
-    if (fixtureView === "dialog-command-icon") browserAction("Actions for Power", "Choose icon");
-    if (fixtureView === "dialog-device-move") browserAction("Actions for Television", "Move or change location");
-    if (fixtureView === "dialog-device-settings") browserAction("Actions for Television", "Entity settings");
+  if (fixtureView === "infrared-hardware") {
+    await clickButton(card, "Infrared hardware");
+  }
+  if (fixtureView === "compatibility-adapter-hardware") {
+    await clickButton(card, "Infrared hardware");
+  }
+  if (["learn-waiting", "learn-review", "learn-error"].includes(fixtureView)) {
+    card.testEmitterRef = "fixture-emitter-one";
     await card.updateComplete;
+  }
+  if (["learn-dialog", "learn-waiting", "learn-review", "learn-error", "no-receiver-dialog"].includes(fixtureView)) {
+    await clickButton(card, "Learn command");
+  }
+  if (["learn-waiting", "learn-review", "learn-error"].includes(fixtureView)) {
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const stage = card.dialog?.data?.stage;
+      if (
+        (fixtureView === "learn-waiting" && stage === "waiting") ||
+        (fixtureView === "learn-review" && stage === "review") ||
+        (fixtureView === "learn-error" && stage === "error")
+      ) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  if (fixtureView === "profile-dialog") {
+    await clickButton(card, "Add remote profile");
+  }
+  if (["custom-signal-dialog", "custom-signal-fallback"].includes(fixtureView)) {
+    await clickButton(card, "Create custom signal");
+  }
+  if (fixtureView === "catalog-dialog") {
+    await clickButton(card, "Find codes");
+  }
+  if (fixtureView === "confirmation-dialog") {
+    await clickButton(card, "Actions for Silkycasters RGBW");
+    await clickButton(card, "Delete profile");
+  }
+  if (fixtureView === "icon-dialog") {
+    await clickButton(card, "Actions for Power");
+    await clickButton(card, "Choose icon");
+  }
+  if (fixtureView === "bulk-selection") {
+    await clickButton(card, "Select");
+  }
+  if (["backup-dialog", "import-dialog", "command-inspector", "command-edit", "command-duplicate", "signal-lab"].includes(fixtureView)) {
+    await clickButton(card, fixtureView === "backup-dialog" ? "Backup & restore" : fixtureView === "import-dialog" ? "Import signals" : "Power");
+    if (fixtureView === "signal-lab") {
+      await clickButton(card, "Open in Signal Lab");
+    }
+    if (fixtureView === "command-edit") {
+      await clickButton(card, "Edit");
+    }
+    if (fixtureView === "command-duplicate") {
+      await clickButton(card, "Duplicate");
+    }
   }
 }
 
 document.documentElement.dataset.fixtureReady = "true";
-window.__IMPRINT_REFINERY_FIXTURES__ = { command, registry, unassignedRegistry, history, catalogProfile, catalogSummary, candidate, timings, analysis, signal, hass, calls, view: fixtureView, theme: fixtureTheme };
+window.__IMPRINT_REFINERY_FIXTURES__ = { command, workspaceRegistry, history, catalogProfile, catalogSummary, candidate, timings, analysis, signal, hass, calls, view: fixtureView, theme: fixtureTheme };

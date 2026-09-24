@@ -8,17 +8,6 @@ export interface HomeAssistant {
   callWS(message: Dict): Promise<any>;
 }
 
-export interface Emitter {
-  key: string;
-  name?: string;
-  entity_id?: string;
-  enabled?: boolean;
-  available?: boolean;
-  can_capture?: boolean;
-  transport?: "home_assistant_ir" | "zha_bridge";
-  config?: Dict;
-}
-
 export interface SignalData {
   carrier_frequency?: number;
   carrier_source?: string;
@@ -71,6 +60,7 @@ export interface ProtocolRebuild extends Dict {
   timing_count: number;
   changed_timings: number;
   duration_delta_us: number;
+  equivalent_interpretation_count?: number;
   address?: number;
   command?: number;
   toggle?: number;
@@ -108,76 +98,69 @@ export interface ApplianceData extends Dict {
   appliance_type?: string;
   preferred_platform?: string;
   emitter_id?: string;
+  remote_profile_id?: string | null;
+  infrared_emitter_ref?: string | null;
+  route_status?: "ready" | "unassigned" | "missing" | "unavailable";
+  area?: { area_id: string; name: string } | null;
   commands?: Dict<CommandData>;
   home_assistant?: {
     entity_id?: string;
+    available?: boolean;
     platform?: string;
     device_id?: string;
     device_url?: string;
     configuration_url?: string;
+    command_entities?: Dict<string>;
   };
 }
 
-export interface LocationData extends Dict {
+export interface RemoteProfileData extends Dict {
   name?: string;
-  appliances?: Dict<ApplianceData>;
+  appliance_type?: string;
+  commands?: Dict<CommandData>;
+  dependent_appliance_ids?: string[];
+}
+
+export interface CommandSelectionState {
+  remoteProfileId: string;
+  commandIds: string[];
+}
+
+export interface InfraredHardwareEntity extends Dict {
+  ref: string;
+  entity_id: string;
+  name: string;
+  available: boolean;
+  last_activity?: string | null;
+  platform?: string;
+  compatibility_adapter?: boolean;
+  device_id?: string | null;
+  device_name?: string | null;
+  device_url?: string | null;
+  entity_url?: string;
+  area_name?: string | null;
+}
+
+export interface AreaSummary {
+  area_id: string;
+  name: string;
 }
 
 export interface RegistryData extends Dict {
-  emitters?: Emitter[];
-  locations?: Dict<LocationData>;
+  remote_profiles?: Dict<RemoteProfileData>;
+  appliances?: Dict<ApplianceData>;
+  infrared_hardware?: {
+    emitters: InfraredHardwareEntity[];
+    receivers: InfraredHardwareEntity[];
+    compatibility_adapter_available?: boolean;
+  };
+  areas?: AreaSummary[];
 }
 
-export interface CommandRef {
-  locId: string;
-  applianceId: string;
-  cmdId: string;
-}
-
-export interface CommandEntry extends CommandRef {
-  location: LocationData;
-  appliance: ApplianceData;
-  command: CommandData;
-}
-
-export interface InspectorState extends CommandRef {
-  tab: "overview" | "signal" | "code" | "history";
-  history?: any;
-  loading?: boolean;
-  representation?: string;
-  representations?: Dict<string>;
-  representationLoading?: boolean;
-  conversionLossReport?: LossReport;
-  zoom?: number;
-  pan?: number;
-  revisionSelected?: number | null;
-  binaryDecoderMode?: "auto" | "pulse_distance" | "pulse_width" | "protocol";
-}
-
-export interface LearnState {
-  seq: number;
-  step: "waiting" | "preparing" | "review" | "error";
-  locationId: string;
-  applianceId: string;
+export interface LabState {
+  sourceProfileId: string;
+  remoteProfileId: string;
   commandId: string;
-  name: string;
-  role: string;
-  targetKey: string;
-  newApplianceName: string;
-  code: string;
-  originalCode?: string;
-  originalPreview?: any;
-  optimized?: boolean;
-  preview?: any;
-  catalogMatches?: any[];
-  duplicateMatch?: CommandRef & { commandName: string; applianceName: string };
-  replacingEquivalent?: boolean;
-  error?: string;
-  errorDetail?: string;
-  deadline: number;
-}
-
-export interface LabState extends CommandRef {
   sourceName: string;
   sourceRevision: number;
   original: number[];
@@ -239,7 +222,9 @@ export interface LabPreview {
   timings: number[];
   changed: number;
   durationDelta: number;
+  durationDeltaPercent?: number;
   maxTimingError: number;
+  maxTimingErrorPercent?: number;
   frameDelta: number;
   roundTripChanges: number | null;
   evidenceClass: string;
@@ -252,41 +237,6 @@ export interface LabPreview {
   description?: string;
   timingBasis?: string;
   applyLabel?: string;
-}
-
-export interface CatalogState extends Dict {
-  mode: "choices" | "find" | "match" | "import";
-  stage?: "guided" | "confirm";
-  category?: string;
-  brand?: string;
-  model?: string;
-  name?: string;
-  searched?: boolean;
-  results?: any[];
-  catalog?: any;
-  selectedProfile?: any;
-  guidedSession?: any;
-  candidates?: any[];
-  confirmedCandidate?: any;
-  confirmedProfileId?: string;
-  verifiedFingerprints?: string[];
-  importPlan?: {
-    all_command_ids?: string[];
-    starter_command_ids?: string[];
-    counts?: Dict<number>;
-    target?: Dict;
-    provenance?: Dict;
-  };
-  unsupportedCommands?: Array<{
-    name?: string;
-    source?: string;
-    error?: string;
-  }>;
-  lossReport?: LossReport;
-  error?: string;
-}
-
-export interface UIAction<T = Dict> {
-  action: string;
-  detail?: T;
+  recognitionLabel?: string;
+  protocolAlignment?: boolean;
 }

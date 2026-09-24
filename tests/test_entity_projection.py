@@ -8,14 +8,25 @@ from custom_components.imprint_refinery.entity_projection import (
 
 
 def library_with(*appliances: tuple[str, dict]) -> dict:
-    return {
-        "locations": {
-            "studio": {
-                "name": "Studio",
-                "appliances": dict(appliances),
-            }
+    profiles = {}
+    instances = {}
+    for appliance_id, data in appliances:
+        global_id = f"studio__{appliance_id}"
+        profile_id = f"{global_id}_profile"
+        profiles[profile_id] = {
+            "name": data.get("name", appliance_id),
+            "appliance_type": data.get("appliance_type", "generic"),
+            "commands": data.get("commands", {}),
         }
-    }
+        instances[global_id] = {
+            "name": data.get("name", appliance_id),
+            "remote_profile_id": profile_id,
+            "infrared_emitter_ref": data.get(
+                "infrared_emitter_ref", data.get("emitter_id", "emitter-uuid")
+            ),
+            "preferred_platform": data.get("preferred_platform", "auto"),
+        }
+    return {"remote_profiles": profiles, "appliances": instances}
 
 
 def test_projection_selects_platforms_without_creating_compatibility_entities() -> None:
@@ -58,12 +69,15 @@ def test_projection_selects_platforms_without_creating_compatibility_entities() 
 
     plans = {item.appliance: item for item in project_library(document)}
 
-    assert plans["receiver"].platform == "media_player"
-    assert plans["receiver"].emitter == "desk_blaster"
-    assert plans["receiver"].roles == {"play": "start", "volume_down": "quiet"}
-    assert plans["lamp"].platform == "switch"
-    assert plans["lamp"].entity_key == "studio__lamp__switch"
-    assert plans["remote"].platform == "remote"
+    assert plans["studio__receiver"].platform == "media_player"
+    assert plans["studio__receiver"].emitter == "desk_blaster"
+    assert plans["studio__receiver"].roles == {
+        "play": "start",
+        "volume_down": "quiet",
+    }
+    assert plans["studio__lamp"].platform == "switch"
+    assert plans["studio__lamp"].entity_key == "studio__lamp__switch"
+    assert plans["studio__remote"].platform == "remote"
 
 
 def test_switch_preference_is_refused_for_mixed_controls() -> None:
@@ -140,7 +154,6 @@ def test_unmapped_commands_become_stable_named_button_entities() -> None:
     ]
     assert buttons[0].entity_name == "Red"
     assert buttons[0].icon == "mdi:palette"
-    assert buttons[0].area_name == "Studio"
     assert project_platform(
         library_with(("lamp", {"commands": {"red": {"name": "Red"}}})),
         "button",
@@ -169,14 +182,22 @@ def test_media_buttons_exclude_only_commands_with_native_controls() -> None:
     assert [button.command_id for button in buttons] == ["fast", "night"]
 
 
-def test_unassigned_commands_do_not_suggest_a_home_assistant_area() -> None:
+def test_unassigned_appliance_does_not_project_usable_entities() -> None:
     document = {
-        "locations": {
-            "unsorted": {
-                "name": "Unsorted",
-                "appliances": {"remote": {"commands": {"custom": {"name": "Custom"}}}},
+        "remote_profiles": {
+            "remote_profile": {
+                "name": "Remote",
+                "appliance_type": "generic",
+                "commands": {"custom": {"name": "Custom"}},
             }
-        }
+        },
+        "appliances": {
+            "remote": {
+                "name": "Remote",
+                "remote_profile_id": "remote_profile",
+                "infrared_emitter_ref": None,
+                "preferred_platform": "remote",
+            }
+        },
     }
-    [button] = project_command_buttons(document)
-    assert button.area_name is None
+    assert project_command_buttons(document) == []

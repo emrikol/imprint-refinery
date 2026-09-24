@@ -13,7 +13,8 @@ from .revisions import (
 )
 
 BACKUP_SCHEMA = "imprint_refinery.backup"
-BACKUP_VERSION = 1
+BACKUP_VERSION = 2
+LEGACY_BACKUP_VERSION = 1
 MAX_BACKUP_COMMANDS = 500
 MAX_REVISIONS_PER_COMMAND = 10_000
 
@@ -30,12 +31,16 @@ _COMMAND_FIELDS = (
 )
 _SNAPSHOT_FIELDS = tuple(field for field in _COMMAND_FIELDS if field != "updated_at")
 _PRIVATE_KEYS = {
+    "area_id",
     "cluster_id",
+    "device_id",
     "endpoint_id",
     "entity_id",
     "host",
     "hostname",
     "ieee",
+    "infrared_emitter_ref",
+    "infrared_receiver_ref",
     "source_command",
     "emitter_id",
     "zha_device",
@@ -49,66 +54,65 @@ class BackupError(ValueError):
 def export_backup(
     registry: dict[str, Any],
     *,
-    location_id: str | None = None,
-    appliance_id: str | None = None,
+    remote_profile_id: str | None = None,
     include_history: bool = True,
 ) -> dict[str, Any]:
-    """Export a library, location, or appliance without installation data."""
-    locations = registry.get("locations", {})
-    if appliance_id and not location_id:
-        raise BackupError("appliance_id requires location_id")
-    if location_id and location_id not in locations:
-        raise BackupError(f"location {location_id!r} was not found")
-
-    selected_locations = (
-        {location_id: locations[location_id]} if location_id else locations
+    """Export profiles and optional appliance references without installation data."""
+    profiles = registry.get("remote_profiles", {})
+    appliances = registry.get("appliances", {})
+    if remote_profile_id and remote_profile_id not in profiles:
+        raise BackupError(f"remote profile {remote_profile_id!r} was not found")
+    selected = (
+        {remote_profile_id: profiles[remote_profile_id]}
+        if remote_profile_id
+        else profiles
     )
-    output_locations: dict[str, Any] = {}
+    output_profiles: dict[str, Any] = {}
     command_count = 0
-    for current_location_id, location in selected_locations.items():
-        appliances = location.get("appliances", {})
-        if appliance_id:
-            if appliance_id not in appliances:
-                raise BackupError(f"appliance {appliance_id!r} was not found")
-            appliances = {appliance_id: appliances[appliance_id]}
-        output_appliances: dict[str, Any] = {}
-        for current_appliance_id, appliance in appliances.items():
-            commands = {
-                command_id: _export_command(command, include_history=include_history)
-                for command_id, command in appliance.get("commands", {}).items()
-                if command.get("code")
-            }
-            command_count += len(commands)
-            output_appliances[current_appliance_id] = {
-                "name": str(appliance.get("name") or current_appliance_id),
-                "appliance_type": str(appliance.get("appliance_type") or "generic"),
-                "preferred_platform": str(
-                    appliance.get("preferred_platform") or "auto"
-                ),
-                "commands": commands,
-            }
-        output_locations[current_location_id] = {
-            "name": str(location.get("name") or current_location_id),
-            "appliances": output_appliances,
+    for profile_id, profile in selected.items():
+        commands = {
+            command_id: _export_command(command, include_history=include_history)
+            for command_id, command in profile.get("commands", {}).items()
+            if command.get("code")
         }
-
-    scope = "appliance" if appliance_id else "location" if location_id else "library"
+        command_count += len(commands)
+        output_profiles[profile_id] = {
+            "name": str(profile.get("name") or profile_id),
+            "appliance_type": str(profile.get("appliance_type") or "generic"),
+            "commands": commands,
+        }
+    selected_appliances = {
+        appliance_id: {
+            "name": str(appliance.get("name") or appliance_id),
+            "remote_profile_id": appliance.get("remote_profile_id"),
+            "preferred_platform": str(appliance.get("preferred_platform") or "auto"),
+        }
+        for appliance_id, appliance in appliances.items()
+        if not remote_profile_id
+        and appliance.get("remote_profile_id") in output_profiles
+    }
     return {
         "schema": BACKUP_SCHEMA,
         "version": BACKUP_VERSION,
-        "scope": scope,
+        "scope": "remote_profile" if remote_profile_id else "library",
         "history": "full" if include_history else "current",
         "command_count": command_count,
-        "locations": output_locations,
+        "remote_profiles": output_profiles,
+        "appliances": selected_appliances,
     }
 
 
 def inspect_backup(value: str | dict[str, Any]) -> dict[str, Any]:
-    """Validate a native backup and flatten its commands for an import preview."""
+    """Validate a backup and return canonical profile/appliance records."""
     document = _load_document(value)
     if document.get("schema") != BACKUP_SCHEMA:
         raise BackupError("document is not an Imprint Refinery backup")
-    return _inspect_versioned_backup(document)
+    version = document.get("version")
+    if version == LEGACY_BACKUP_VERSION:
+        document = _convert_v1_backup(document)
+    elif version != BACKUP_VERSION:
+        raise BackupError(f"unsupported native backup version: {version!r}")
+    return _inspect_v2_backup(document)
 
 
 def normalize_import_command(
@@ -116,19 +120,14 @@ def normalize_import_command(
     *,
     created_at: str,
 ) -> dict[str, Any]:
-    """Return one validated command ready for registry insertion."""
+    """Return one validated command ready for library insertion."""
     normalized = _validate_command(command)
     revisions = normalized.get(REVISIONS, [])
     if revisions:
         return normalized
-
     normalized.pop(CURRENT_REVISION, None)
     normalized.pop(REVISION_LABELS, None)
-    return initialize_history(
-        normalized,
-        created_at=created_at,
-        action="imported",
-    )
+    return initialize_history(normalized, created_at=created_at, action="imported")
 
 
 def _load_document(value: str | dict[str, Any]) -> dict[str, Any]:
@@ -144,67 +143,124 @@ def _load_document(value: str | dict[str, Any]) -> dict[str, Any]:
     return document
 
 
-def _inspect_versioned_backup(document: dict[str, Any]) -> dict[str, Any]:
-    if document.get("version") != BACKUP_VERSION:
-        raise BackupError(
-            f"unsupported native backup version: {document.get('version')!r}"
-        )
-    history = document.get("history")
-    if history not in {"current", "full"}:
-        raise BackupError("native backup history must be 'current' or 'full'")
+def _convert_v1_backup(document: dict[str, Any]) -> dict[str, Any]:
+    """Convert each legacy appliance into its own profile and appliance."""
     locations = document.get("locations")
     if not isinstance(locations, dict):
         raise BackupError("native backup locations must be an object")
-
-    commands: list[dict[str, Any]] = []
+    profiles: dict[str, Any] = {}
+    appliances: dict[str, Any] = {}
     for location_id, location in locations.items():
         if not isinstance(location, dict):
             raise BackupError(f"location {location_id!r} must be an object")
-        appliances = location.get("appliances", {})
-        if not isinstance(appliances, dict):
+        legacy_appliances = location.get("appliances", {})
+        if not isinstance(legacy_appliances, dict):
             raise BackupError(f"location {location_id!r} appliances must be an object")
-        for appliance_id, appliance in appliances.items():
+        for appliance_id, appliance in legacy_appliances.items():
             if not isinstance(appliance, dict):
                 raise BackupError(f"appliance {appliance_id!r} must be an object")
-            device_commands = appliance.get("commands", {})
-            if not isinstance(device_commands, dict):
+            global_id = f"{location_id}__{appliance_id}"
+            if global_id in appliances:
+                raise BackupError("legacy appliance IDs collide after import")
+            profiles[global_id] = {
+                "name": str(appliance.get("name") or appliance_id),
+                "appliance_type": str(appliance.get("appliance_type") or "generic"),
+                "commands": deepcopy(appliance.get("commands", {})),
+            }
+            appliances[global_id] = {
+                "name": str(appliance.get("name") or appliance_id),
+                "remote_profile_id": global_id,
+                "preferred_platform": str(
+                    appliance.get("preferred_platform") or "auto"
+                ),
+                "area_name": str(location.get("name") or location_id),
+            }
+    return {
+        "schema": BACKUP_SCHEMA,
+        "version": BACKUP_VERSION,
+        "scope": document.get("scope", "library"),
+        "history": document.get("history"),
+        "command_count": document.get("command_count"),
+        "remote_profiles": profiles,
+        "appliances": appliances,
+    }
+
+
+def _inspect_v2_backup(document: dict[str, Any]) -> dict[str, Any]:
+    history = document.get("history")
+    if history not in {"current", "full"}:
+        raise BackupError("native backup history must be 'current' or 'full'")
+    profiles = document.get("remote_profiles")
+    appliances = document.get("appliances", {})
+    if not isinstance(profiles, dict):
+        raise BackupError("native backup remote_profiles must be an object")
+    if not isinstance(appliances, dict):
+        raise BackupError("native backup appliances must be an object")
+
+    normalized_profiles: dict[str, Any] = {}
+    commands: list[dict[str, Any]] = []
+    for profile_id, profile in profiles.items():
+        if not isinstance(profile, dict):
+            raise BackupError(f"remote profile {profile_id!r} must be an object")
+        source_commands = profile.get("commands", {})
+        if not isinstance(source_commands, dict):
+            raise BackupError(
+                f"remote profile {profile_id!r} commands must be an object"
+            )
+        normalized_commands: dict[str, Any] = {}
+        for command_id, command in source_commands.items():
+            if not isinstance(command, dict):
+                raise BackupError(f"command {command_id!r} must be an object")
+            normalized = _validate_command(command)
+            normalized_commands[str(command_id)] = normalized
+            commands.append(
+                {
+                    "remote_profile_id": str(profile_id),
+                    "command_id": str(command_id),
+                    "command": normalized,
+                }
+            )
+            if len(commands) > MAX_BACKUP_COMMANDS:
                 raise BackupError(
-                    f"appliance {appliance_id!r} commands must be an object"
+                    f"native backup contains more than {MAX_BACKUP_COMMANDS} commands"
                 )
-            for command_id, command in device_commands.items():
-                if not isinstance(command, dict):
-                    raise BackupError(f"command {command_id!r} must be an object")
-                normalized = _validate_command(command)
-                commands.append(
-                    {
-                        "location_id": str(location_id),
-                        "location_name": str(location.get("name") or location_id),
-                        "appliance_id": str(appliance_id),
-                        "appliance_name": str(appliance.get("name") or appliance_id),
-                        "appliance_type": str(
-                            appliance.get("appliance_type") or "generic"
-                        ),
-                        "preferred_platform": str(
-                            appliance.get("preferred_platform") or "auto"
-                        ),
-                        "command_id": str(command_id),
-                        "command": normalized,
-                    }
-                )
-                if len(commands) > MAX_BACKUP_COMMANDS:
-                    raise BackupError(
-                        f"native backup contains more than {MAX_BACKUP_COMMANDS} commands"
-                    )
+        normalized_profiles[str(profile_id)] = {
+            "name": str(profile.get("name") or profile_id),
+            "appliance_type": str(profile.get("appliance_type") or "generic"),
+            "commands": normalized_commands,
+        }
     if not commands:
         raise BackupError("native backup contains no commands")
     declared_count = document.get("command_count")
     if declared_count is not None and declared_count != len(commands):
         raise BackupError("native backup command count does not match its contents")
+
+    normalized_appliances: dict[str, Any] = {}
+    for appliance_id, appliance in appliances.items():
+        if not isinstance(appliance, dict):
+            raise BackupError(f"appliance {appliance_id!r} must be an object")
+        profile_id = appliance.get("remote_profile_id")
+        if profile_id not in normalized_profiles:
+            raise BackupError(
+                f"appliance {appliance_id!r} references an unknown remote profile"
+            )
+        normalized_appliances[str(appliance_id)] = _sanitize(
+            {
+                "name": str(appliance.get("name") or appliance_id),
+                "remote_profile_id": str(profile_id),
+                "preferred_platform": str(
+                    appliance.get("preferred_platform") or "auto"
+                ),
+                "area_name": appliance.get("area_name"),
+            }
+        )
     return {
         "schema": BACKUP_SCHEMA,
         "version": BACKUP_VERSION,
         "scope": document.get("scope", "library"),
         "history": history,
+        "remote_profiles": normalized_profiles,
+        "appliances": normalized_appliances,
         "commands": commands,
     }
 
@@ -292,7 +348,6 @@ def _validate_command(command: dict[str, Any]) -> dict[str, Any]:
                 for key, value in labels.items()
                 if str(value).strip()
             }
-
     return normalized
 
 
