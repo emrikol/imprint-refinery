@@ -18,6 +18,8 @@ export interface SignalLabHost {
   setError(message: string): void;
   copyText(value: string, success?: string): Promise<void>;
   reload(): Promise<void>;
+  preserveDraft(state: LabState): void;
+  clearDraft(): void;
 }
 
 /** Owns the Signal Lab draft, reducer, service orchestration, and timer lifecycle. */
@@ -38,6 +40,7 @@ export class SignalLabController {
       this.host.setError("This command does not contain editable timing data.");
       return false;
     }
+    this.preserveCurrentBeforeReplacing(profileId, commandId, false);
     this.cancelAnalysis();
     const total = timings.reduce((sum, value) => sum + value, 0);
     const storedRoles = Array.isArray(command.source?.frame_roles)
@@ -90,12 +93,96 @@ export class SignalLabController {
     return true;
   }
 
+  openCustom(
+    profileId: string,
+    timings: number[] = [560, 560],
+    carrierFrequency = 38_000,
+  ): boolean {
+    if (!profileId || !this.host.registry().remote_profiles?.[profileId]) {
+      this.host.setError("Choose a remote profile before creating a signal.");
+      return false;
+    }
+    if (
+      !timings.length ||
+      !timings.every(
+        (item) => Number.isInteger(item) && item > 0 && item <= 65_535,
+      )
+    ) {
+      this.host.setError("The custom signal timings are not valid.");
+      return false;
+    }
+    this.preserveCurrentBeforeReplacing(profileId, "", true);
+    this.cancelAnalysis();
+    const total = timings.reduce((sum, value) => sum + value, 0);
+    this.setState({
+      sourceProfileId: profileId,
+      remoteProfileId: profileId,
+      commandId: "",
+      sourceName: "New custom signal",
+      sourceRevision: 0,
+      original: [...timings],
+      timings: [...timings],
+      carrierFrequency,
+      originalCarrierFrequency: carrierFrequency,
+      carrierSource: "assumed",
+      sourceAnalysis: {},
+      undo: [],
+      redo: [],
+      selected: 0,
+      selectionStart: 0,
+      selectionEnd: 0,
+      selectedFrame: 0,
+      frameRoles: [],
+      originalFrameRoles: [],
+      zoom: 1,
+      pan: 0,
+      cursors: [0, total],
+      activeCursor: 0,
+      view: "edit",
+      detailTab: "timings",
+      convertFormat: "pronto",
+      binaryDecoderMode: "auto",
+      saveOpen: false,
+      editingOverlays: false,
+      snap: 10,
+      boundaryMode: "shift",
+      dirty: true,
+      custom: true,
+      saveName: "New custom signal",
+      saveId: this.uniqueCommandId(profileId, "custom_signal"),
+      idTouched: false,
+    });
+    this.scheduleAnalysis();
+    return true;
+  }
+
+  restore(state: LabState): boolean {
+    if (!this.validStoredDraft(state)) return false;
+    this.cancelAnalysis();
+    this.setState({
+      ...state,
+      analysisPending: false,
+      codeRepresentation: state.codeRepresentation?.loading
+        ? undefined
+        : state.codeRepresentation,
+      leavePrompt: false,
+      testCooldownUntil: undefined,
+    });
+    if (state.dirty) this.scheduleAnalysis();
+    return true;
+  }
+
   dispose(): void {
     this.cancelAnalysis();
   }
 
   /** Apply browser navigation without turning route restoration into a user action. */
   closeForRoute(): void {
+    if (this.current?.dirty) {
+      this.host.preserveDraft({ ...this.current, leavePrompt: false });
+    } else {
+      this.host.clearDraft();
+    }
     this.close();
   }
 
@@ -151,8 +238,10 @@ export class SignalLabController {
         this.leave();
         break;
       case "discard-leave":
-      case "keep-draft-leave":
         this.leave(true);
+        break;
+      case "keep-draft-leave":
+        this.leave(false, true);
         break;
       case "target":
         this.setState({
@@ -258,7 +347,8 @@ export class SignalLabController {
   }
 
   private uniqueCommandId(profileId: string, base: string): string {
-    const commands = this.host.registry().remote_profiles?.[profileId]?.commands || {};
+    const commands =
+      this.host.registry().remote_profiles?.[profileId]?.commands || {};
     let candidate = slugify(base) || "command";
     let suffix = 2;
     while (commands[candidate]) {
@@ -301,7 +391,11 @@ export class SignalLabController {
     const lab = this.current;
     if (!lab) return;
     if (!lab.dirty) {
-      this.setState({ ...lab, draftAnalysis: undefined, analysisPending: false });
+      this.setState({
+        ...lab,
+        draftAnalysis: undefined,
+        analysisPending: false,
+      });
       return;
     }
     const timings = [...lab.timings];
@@ -449,7 +543,8 @@ export class SignalLabController {
     }
     const lab = this.current;
     const emitterRef = this.host.testEmitterRef();
-    if (!lab || !emitterRef || (lab.testCooldownUntil || 0) > Date.now()) return;
+    if (!lab || !emitterRef || (lab.testCooldownUntil || 0) > Date.now())
+      return;
     const validation = validateDraft(
       lab.timings,
       lab.carrierFrequency,
@@ -489,7 +584,9 @@ export class SignalLabController {
     const lab = this.current;
     if (!lab || !lab.saveId || !lab.saveName.trim()) return;
     const profileId = lab.remoteProfileId;
-    if (this.host.registry().remote_profiles?.[profileId]?.commands?.[lab.saveId]) {
+    if (
+      this.host.registry().remote_profiles?.[profileId]?.commands?.[lab.saveId]
+    ) {
       this.host.setError(`A command with ID “${lab.saveId}” already exists.`);
       return;
     }
@@ -511,20 +608,58 @@ export class SignalLabController {
           frame_roles: lab.frameRoles,
         },
       });
+      this.host.clearDraft();
       this.close();
       await this.host.reload();
       this.host.notify(`Saved ${lab.saveName.trim()}.`);
     });
   }
 
-  private leave(discard = false): void {
+  private leave(discard = false, keepDraft = false): void {
     const lab = this.current;
     if (!lab) return;
-    if (lab.dirty && !discard) {
+    if (lab.dirty && !discard && !keepDraft) {
       this.setState({ ...lab, leavePrompt: true });
       return;
     }
+    if (keepDraft) {
+      this.host.preserveDraft({ ...lab, leavePrompt: false });
+    } else {
+      this.host.clearDraft();
+    }
     this.close();
+  }
+
+  private validStoredDraft(value: LabState): boolean {
+    if (!value || typeof value !== "object") return false;
+    if (!value.sourceProfileId || (!value.custom && !value.commandId))
+      return false;
+    if (!this.host.registry().remote_profiles?.[value.sourceProfileId])
+      return false;
+    const validTimings = (items: unknown): items is number[] =>
+      Array.isArray(items) &&
+      items.length > 0 &&
+      items.every(
+        (item) =>
+          Number.isInteger(item) && Number(item) > 0 && Number(item) <= 65_535,
+      );
+    return validTimings(value.original) && validTimings(value.timings);
+  }
+
+  private preserveCurrentBeforeReplacing(
+    profileId: string,
+    commandId: string,
+    custom: boolean,
+  ): void {
+    const current = this.current;
+    if (
+      !current?.dirty ||
+      (current.sourceProfileId === profileId &&
+        Boolean(current.custom) === custom &&
+        (custom || current.commandId === commandId))
+    )
+      return;
+    this.host.preserveDraft({ ...current, leavePrompt: false });
   }
 
   private close(): void {
@@ -597,7 +732,10 @@ export class SignalLabController {
     const frames = frameRanges(lab.timings);
     const index = Math.max(
       0,
-      Math.min(frames.length - 1, Number(detail.index ?? lab.selectedFrame) || 0),
+      Math.min(
+        frames.length - 1,
+        Number(detail.index ?? lab.selectedFrame) || 0,
+      ),
     );
     const frame = frames[index];
     if (detail.operation === "select" && frame) {
@@ -618,7 +756,9 @@ export class SignalLabController {
       return;
     }
     if (!frame) return;
-    const chunks = frames.map((range) => lab.timings.slice(range.start, range.end));
+    const chunks = frames.map((range) =>
+      lab.timings.slice(range.start, range.end),
+    );
     const roles = [...lab.frameRoles];
     while (roles.length < frames.length) roles.push("auto");
     if (detail.operation === "move") {
@@ -628,7 +768,12 @@ export class SignalLabController {
       chunks.splice(target, 0, chunk);
       const [role] = roles.splice(index, 1);
       roles.splice(target, 0, role);
-      this.updateWithPrevious(chunks.flat(), lab.timings, roles, lab.frameRoles);
+      this.updateWithPrevious(
+        chunks.flat(),
+        lab.timings,
+        roles,
+        lab.frameRoles,
+      );
       const current = this.current;
       if (current) this.setState({ ...current, selectedFrame: target });
       return;
@@ -658,13 +803,23 @@ export class SignalLabController {
     if (["duplicate", "expand-repeat"].includes(detail.operation)) {
       chunks.splice(index + 1, 0, [...chunks[index]]);
       roles.splice(index + 1, 0, roles[index]);
-      this.updateWithPrevious(chunks.flat(), lab.timings, roles, lab.frameRoles);
+      this.updateWithPrevious(
+        chunks.flat(),
+        lab.timings,
+        roles,
+        lab.frameRoles,
+      );
       return;
     }
     if (detail.operation === "remove" && chunks.length > 1) {
       chunks.splice(index, 1);
       roles.splice(index, 1);
-      this.updateWithPrevious(chunks.flat(), lab.timings, roles, lab.frameRoles);
+      this.updateWithPrevious(
+        chunks.flat(),
+        lab.timings,
+        roles,
+        lab.frameRoles,
+      );
       return;
     }
     if (
@@ -818,7 +973,9 @@ export class SignalLabController {
     }
     const next: LabState = {
       ...lab,
-      timings: [...(detail.phase === "cancel" ? detail.baseline : detail.timings)],
+      timings: [
+        ...(detail.phase === "cancel" ? detail.baseline : detail.timings),
+      ],
     };
     next.dirty = draftDirty(next);
     this.setState(next);

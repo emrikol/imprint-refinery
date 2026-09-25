@@ -151,10 +151,12 @@ class OfflineCatalog:
         *,
         normalized_50us: str | None = None,
         parsed: Iterable[tuple[str, int, int]] = (),
-        limit: int = 25,
+        limit: int | None = 25,
     ) -> dict[str, Any]:
         """Look up exact raw fingerprints and parsed protocol fields."""
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+        ):
             raise ValueError("limit must be a positive integer")
         index = self._load_matches()
         requested: list[tuple[str, str, dict[str, Any]]] = []
@@ -195,7 +197,7 @@ class OfflineCatalog:
                     continue
                 seen.add(identity)
                 total += 1
-                if len(matches) >= limit:
+                if limit is not None and len(matches) >= limit:
                     continue
                 profile_id = profile_ids[profile_index]
                 profile = self._profiles[profile_id]
@@ -218,7 +220,7 @@ class OfflineCatalog:
                 )
         return {
             "match_count": total,
-            "truncated": total > len(matches),
+            "truncated": limit is not None and total > len(matches),
             "matches": matches,
         }
 

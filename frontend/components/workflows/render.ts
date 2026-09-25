@@ -1,7 +1,9 @@
 import { nothing, type TemplateResult } from "lit";
 import type { Dict, RegistryData } from "../../types";
 import type { WaveformComparisonSignal } from "../../core/waveform-comparison";
+import { actionTileStyles } from "../shared/action-tile";
 import { dialogStyles } from "../shared/dialog";
+import { signalCaptureStateStyles } from "../shared/signal-capture-state";
 import { textareaFallbackStyles } from "../shared/textarea";
 import { workspaceEmptyStyles } from "../shared/workspace-empty-state";
 import { workspaceNoticeStyles } from "../shared/workspace-notice";
@@ -13,10 +15,7 @@ import {
   chooseIconDialogStyles,
   renderChooseIconDialog,
 } from "./choose-icon-dialog";
-import { renderCustomSignalDialog } from "./custom-signal-dialog";
-import {
-  renderEditCommandDialog,
-} from "./edit-command-dialog";
+import { renderEditCommandDialog } from "./edit-command-dialog";
 import type { WorkflowActionHandler } from "./events";
 import {
   importSignalsDialogStyles,
@@ -35,7 +34,6 @@ export type DialogKind =
   | "duplicate-profile"
   | "appliance"
   | "learn"
-  | "custom-signal"
   | "command"
   | "command-edit"
   | "command-duplicate"
@@ -70,6 +68,8 @@ export interface WorkflowDialogContext {
 
 export const workflowDialogStyles = [
   dialogStyles,
+  actionTileStyles,
+  signalCaptureStateStyles,
   textareaFallbackStyles,
   workflowStyles,
   workspaceNoticeStyles,
@@ -131,15 +131,6 @@ export const renderWorkflowDialog = ({
       onAction,
     });
   }
-  if (dialog.kind === "custom-signal") {
-    return renderCustomSignalDialog({
-      data: dialog.data,
-      profiles,
-      error,
-      busy,
-      onAction,
-    });
-  }
   if (dialog.kind === "command-edit" || dialog.kind === "command-duplicate") {
     return renderEditCommandDialog({
       mode: dialog.kind === "command-duplicate" ? "duplicate" : "edit",
@@ -176,6 +167,9 @@ export const renderWorkflowDialog = ({
       receivers: registry.infrared_hardware?.receivers || [],
       error,
       busy,
+      capturing,
+      captureRemaining,
+      captureTimeout,
       onAction,
     });
   }
@@ -202,7 +196,10 @@ export const renderWorkflowDialog = ({
   if (dialog.kind === "comparison") {
     return renderConfirmationDialog({
       heading: dialog.title,
-      message: String(dialog.data.text || "Compare the selected revision with the current command."),
+      message: String(
+        dialog.data.text ||
+          "Compare the selected revision with the current command.",
+      ),
       error,
       busy,
       comparisonOnly: true,
@@ -216,9 +213,12 @@ export const renderWorkflowDialog = ({
   return renderConfirmationDialog({
     heading: dialog.title,
     message: String(dialog.data.text || "This cannot be undone."),
-    actionLabel: dialog.confirmAction === "restore-revision"
+    actionLabel:
+      dialog.confirmAction === "restore-revision"
       ? "Restore"
-      : dialog.danger ? "Delete" : "Confirm",
+        : dialog.danger
+          ? "Delete"
+          : "Confirm",
     error,
     busy,
     danger: Boolean(dialog.danger),
@@ -226,7 +226,8 @@ export const renderWorkflowDialog = ({
     dependentAppliances: Array.isArray(dialog.data.dependent_appliance_names)
       ? dialog.data.dependent_appliance_names.map(String)
       : [],
-    comparison: dialog.confirmAction === "restore-revision"
+    comparison:
+      dialog.confirmAction === "restore-revision"
       ? {
           before: dialog.data.comparison_before as WaveformComparisonSignal,
           after: dialog.data.comparison_after as WaveformComparisonSignal,

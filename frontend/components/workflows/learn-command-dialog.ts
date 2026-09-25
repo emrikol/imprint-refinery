@@ -13,6 +13,7 @@ import {
   requestDialogClose,
 } from "../shared/dialog";
 import { renderFactGrid } from "../shared/metric-grid";
+import { renderSignalCaptureState } from "../shared/signal-capture-state";
 import { renderWorkspaceNotice } from "../shared/workspace-notice";
 import {
   type WorkflowActionHandler,
@@ -36,119 +37,6 @@ export interface LearnCommandDialogOptions {
 export const learnCommandDialogStyles: CSSResult = css`
   ha-dialog.learn-command-dialog { --ha-dialog-width-md: 700px; }
   .learn-command-dialog .irf-dialog-body { gap: 18px; }
-  .learn-capture-state {
-    display: grid;
-    justify-items: center;
-    min-width: 0;
-    padding: 22px 18px 8px;
-    text-align: center;
-  }
-  .learn-receiver-mark {
-    display: grid;
-    place-items: center;
-    width: 68px;
-    height: 68px;
-    border-radius: 50%;
-    color: var(--imprint-accent);
-    background: var(--imprint-accent-soft);
-  }
-  .learn-receiver-mark ha-icon { --mdc-icon-size: 34px; }
-  .learn-capture-state.waiting .learn-receiver-mark {
-    animation: learn-breathe 1.5s ease-in-out infinite;
-  }
-  .learn-capture-state p {
-    max-width: 48ch;
-    margin: 12px 0 0;
-    color: var(--imprint-muted);
-    line-height: 1.5;
-  }
-  .learn-capture-motif {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    width: min(300px, 86%);
-    height: 54px;
-    margin: 18px auto 12px;
-    overflow: hidden;
-  }
-  .learn-capture-motif::after {
-    content: "";
-    position: absolute;
-    inset: 50% 0 auto;
-    height: 2px;
-    border-radius: 2px;
-    background: var(--imprint-accent);
-    opacity: 0;
-    transform: scaleX(.18);
-    transition: opacity 160ms ease, transform 240ms cubic-bezier(.16, 1, .3, 1);
-  }
-  .learn-capture-motif i {
-    width: 4px;
-    height: 34px;
-    border-radius: 4px;
-    background: var(--imprint-accent);
-    opacity: .72;
-    transform: scaleY(.18);
-    transform-origin: center;
-  }
-  .learn-capture-motif.waiting i {
-    animation: learn-listen 940ms ease-in-out infinite alternate;
-  }
-  .learn-capture-motif i:nth-child(2n) {
-    animation-duration: 1.28s;
-    animation-delay: -.72s;
-  }
-  .learn-capture-motif i:nth-child(3n) {
-    animation-duration: .76s;
-    animation-delay: -.31s;
-  }
-  .learn-capture-motif i:nth-child(4n) {
-    animation-duration: 1.46s;
-    animation-delay: -.93s;
-  }
-  .learn-capture-motif i:nth-child(5n) {
-    animation-duration: 1.08s;
-    animation-delay: -.54s;
-  }
-  .learn-capture-motif.received i { opacity: 0; transform: scaleY(.04); }
-  .learn-capture-motif.received::after { opacity: .72; transform: scaleX(1); }
-  .learn-countdown {
-    position: relative;
-    display: grid;
-    place-items: center;
-    width: 138px;
-    height: 138px;
-    margin-top: 6px;
-    border-radius: 50%;
-    background: conic-gradient(
-      var(--imprint-accent) 0 var(--learn-progress),
-      color-mix(in srgb, var(--imprint-muted) 32%, transparent) 0
-    );
-    font-variant-numeric: tabular-nums;
-  }
-  .learn-countdown::before {
-    content: "";
-    position: absolute;
-    inset: 10px;
-    border-radius: inherit;
-    background: var(--imprint-surface);
-  }
-  .learn-countdown-copy {
-    position: relative;
-    z-index: 1;
-    display: grid;
-    justify-items: center;
-  }
-  .learn-countdown strong { font-size: 30px; line-height: 1; }
-  .learn-countdown span {
-    width: 78px;
-    margin-top: 6px;
-    color: var(--imprint-muted);
-    font-size: 11px;
-    line-height: 1.1;
-  }
   .learn-chooser,
   .learn-review,
   .learn-review-form,
@@ -171,6 +59,41 @@ export const learnCommandDialogStyles: CSSResult = css`
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 12px;
+  }
+  .learn-match-notice,
+  .learn-catalog-list,
+  .learn-catalog-review {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+  }
+  .learn-match-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .learn-catalog-list { padding-top: 12px; }
+  .learn-catalog-match {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--divider-color);
+  }
+  .learn-catalog-match:last-of-type { border-bottom: 0; }
+  .learn-catalog-match strong,
+  .learn-catalog-match span { display: block; }
+  .learn-catalog-match span,
+  .learn-catalog-review p {
+    margin: 3px 0 0;
+    color: var(--imprint-muted);
+    line-height: 1.4;
+  }
+  .learn-catalog-review {
+    padding: 12px;
+    border-radius: 12px;
+    background: var(--imprint-surface-2);
   }
   .learn-review-secondary {
     display: flex;
@@ -219,38 +142,12 @@ export const learnCommandDialogStyles: CSSResult = css`
     margin: 0;
     color: var(--imprint-muted);
   }
-  @keyframes learn-listen {
-    from { transform: scaleY(.12); opacity: .38; }
-    to { transform: scaleY(1); opacity: .92; }
-  }
-  @keyframes learn-breathe {
-    50% {
-      transform: scale(1.05);
-      box-shadow: 0 0 0 14px color-mix(
-        in srgb,
-        var(--imprint-accent) 7%,
-        transparent
-      );
-    }
-  }
   @media (max-width: 520px) {
     .learn-review-form,
     .learn-review-actions { grid-template-columns: 1fr; }
     .learn-optimization-notice { grid-template-columns: 1fr; }
     .learn-optimization-notice ha-button { justify-self: start; }
-    .learn-capture-state { padding-inline: 4px; }
   }
-  @media (prefers-reduced-motion: reduce) {
-    .learn-capture-state.waiting .learn-receiver-mark,
-    .learn-capture-motif.waiting i { animation: none; }
-    .learn-capture-motif.waiting i { transform: scaleY(.42); opacity: .68; }
-  }
-`;
-
-const renderCaptureMotif = (state: "waiting" | "received"): TemplateResult => html`
-  <div class=${`learn-capture-motif ${state}`} aria-hidden="true">
-    ${Array.from({ length: 18 }, () => html`<i></i>`)}
-  </div>
 `;
 
 export const renderLearnCommandDialog = ({
@@ -259,6 +156,7 @@ export const renderLearnCommandDialog = ({
   testEmitter,
   error = "",
   busy = false,
+  capturing = false,
   captureRemaining = 0,
   captureTimeout = 60,
   onAction,
@@ -267,13 +165,21 @@ export const renderLearnCommandDialog = ({
   const selectedReceiver = receivers.find(
     (receiver) => receiver.ref === String(data.infrared_receiver_ref || ""),
   );
-  const timeout = Math.max(1, captureTimeout);
-  const remaining = Math.max(0, Math.min(timeout, captureRemaining || timeout));
-  const progress = Math.round((remaining / timeout) * 360);
   const preview = (data.preview || {}) as Dict;
   const signal = (preview.signal || {}) as SignalData;
   const analysis = (preview.analysis || {}) as AnalysisData;
   const timings = Array.isArray(signal.timings) ? signal.timings : [];
+  const duplicateMatch =
+    data.duplicate_match && typeof data.duplicate_match === "object"
+      ? (data.duplicate_match as Dict)
+      : null;
+  const catalogMatches = Array.isArray(data.catalog_matches)
+    ? (data.catalog_matches as Dict[])
+    : [];
+  const catalogReview =
+    data.catalog_match_review && typeof data.catalog_match_review === "object"
+      ? (data.catalog_match_review as Dict)
+      : null;
   const singlePress = analysis.single_press_candidate;
   const canOptimize =
     !data.optimized &&
@@ -284,7 +190,8 @@ export const renderLearnCommandDialog = ({
     Boolean(String(data.name || "").trim()) &&
     Boolean(String(data.command_id || "").trim());
 
-  const title = stage === "waiting"
+  const title =
+    stage === "waiting"
     ? "Waiting for a remote signal"
     : stage === "preparing"
       ? "Signal received"
@@ -293,7 +200,8 @@ export const renderLearnCommandDialog = ({
         : stage === "error"
           ? "No usable signal was captured"
           : "Choose an IR receiver";
-  const description = stage === "waiting"
+  const description =
+    stage === "waiting"
     ? `Listening on ${selectedReceiver?.name || "the selected IR receiver"}`
     : stage === "preparing"
       ? "Preparing the captured timing preview."
@@ -308,34 +216,18 @@ export const renderLearnCommandDialog = ({
 
   if (stage === "waiting" || stage === "preparing") {
     const waiting = stage === "waiting";
-    content = html`<section
-      class=${`learn-capture-state ${waiting ? "waiting" : "preparing"}`}
-      aria-live="polite"
-    >
-      <div class="learn-receiver-mark" aria-hidden="true">
-        <ha-icon icon=${waiting ? "mdi:remote" : "mdi:square-wave"}></ha-icon>
-      </div>
-      <p>
-        ${waiting
-          ? html`Point the original remote at
-              <strong>${selectedReceiver?.name || "the IR receiver"}</strong>
-              and press the button once. A short, deliberate press works best.`
-          : "Decoding the completed signal…"}
-      </p>
-      ${renderCaptureMotif(waiting ? "waiting" : "received")}
-      ${waiting
-        ? html`<div
-            class="learn-countdown"
-            style=${`--learn-progress: ${progress}deg`}
-            aria-label=${`${remaining} seconds remaining`}
-          >
-            <div class="learn-countdown-copy">
-              <strong>${remaining}s</strong>
-              <span>seconds remaining</span>
-            </div>
-          </div>`
-        : html`<ha-spinner aria-label="Preparing signal preview"></ha-spinner>`}
-    </section>`;
+    content = renderSignalCaptureState({
+      phase: waiting ? "listening" : "processing",
+      active: waiting ? capturing : true,
+      receiverName: selectedReceiver?.name || "the IR receiver",
+      remaining: captureRemaining,
+      timeout: captureTimeout,
+      listeningContent: html`Point the original remote at
+        <strong>${selectedReceiver?.name || "the IR receiver"}</strong>
+        and press the button once. A short, deliberate press works best.`,
+      processingContent: "Decoding the completed signal…",
+      processingLabel: "Preparing signal preview",
+    });
     footer = renderDialogFooter([
       {
         label: "Cancel capture",
@@ -366,7 +258,8 @@ export const renderLearnCommandDialog = ({
     content = html`<section class="learn-review">
       <div class="learn-review-waveform">
         <span>Signal received</span>
-        ${timings.length
+        ${
+          timings.length
           ? html`<imprint-signal-waveform
               .readOnly=${true}
               .reveal=${true}
@@ -376,8 +269,10 @@ export const renderLearnCommandDialog = ({
             ></imprint-signal-waveform>`
           : renderWorkspaceNotice({
               icon: "mdi:information-outline",
-              content: "The receiver returned a signal without editable timing data.",
-            })}
+                content:
+                  "The receiver returned a signal without editable timing data.",
+              })
+        }
       </div>
       ${renderFactGrid({
         facts: [
@@ -393,12 +288,24 @@ export const renderLearnCommandDialog = ({
           },
           {
             label: "Duration",
-            value: formatDuration(analysis.total_duration_us || 0),
+            value: formatDuration(
+              analysis.total_duration_us ||
+                timings.reduce((total, timing) => total + timing, 0),
+            ),
           },
           { label: "Evidence", value: evidenceLabel(analysis) },
         ],
       })}
-      ${canOptimize
+      ${
+        data.analysis_error
+          ? html`<ha-alert .alertType=${"warning"}>
+            <strong>Signal analysis is unavailable.</strong>
+            The raw capture is intact and can still be tested or saved.
+          </ha-alert>`
+          : nothing
+      }
+      ${
+        canOptimize
         ? html`<ha-alert .alertType=${"warning"}>
             <div class="learn-optimization-notice">
               <span><strong>Repeated pattern detected.</strong>
@@ -413,9 +320,119 @@ export const renderLearnCommandDialog = ({
           </ha-alert>`
         : data.optimized
           ? html`<ha-alert .alertType=${"info"}>
-              Single-press timing is previewed. Test it before saving.
+              Single-press timing is previewed. Saving retains the original
+              capture as the prior revision. Test this version before relying
+              on it.
             </ha-alert>`
-          : nothing}
+            : nothing
+      }
+      ${
+        duplicateMatch
+          ? html`<ha-alert .alertType=${"warning"}>
+            <div class="learn-match-notice">
+              <span><strong>This looks like
+                ${String(duplicateMatch.command_name || "an existing command")}.</strong>
+                It is already saved in
+                ${String(duplicateMatch.remote_profile_name || "another remote profile")}.
+              </span>
+              <div class="learn-match-actions">
+                <ha-button
+                  appearance="outlined"
+                  variant="neutral"
+                  .disabled=${busy}
+                  @click=${() =>
+                    onAction({
+                      type: "learn-duplicate-open",
+                      match: duplicateMatch,
+                    })}
+                >Review existing</ha-button>
+                <ha-button
+                  appearance="outlined"
+                  variant="neutral"
+                  .disabled=${busy}
+                  @click=${() =>
+                    onAction({
+                      type: "learn-duplicate-replace",
+                      match: duplicateMatch,
+                    })}
+                >Replace existing</ha-button>
+                <ha-button
+                  appearance="plain"
+                  variant="neutral"
+                  .disabled=${busy}
+                  @click=${() => onAction({ type: "learn-duplicate-ignore" })}
+                >Save separately</ha-button>
+              </div>
+            </div>
+          </ha-alert>`
+          : data.duplicate_replacement
+            ? html`<ha-alert .alertType=${"info"}>
+              Saving will add this capture as a new revision of the existing
+              command.
+            </ha-alert>`
+            : nothing
+      }
+      ${
+        catalogMatches.length
+          ? html`<ha-expansion-panel
+            .header=${`Offline catalog matches (${catalogMatches.length})`}
+          >
+            <div class="learn-catalog-list">
+              ${catalogMatches.slice(0, 5).map((match) => {
+                const profile = (match.profile || {}) as Dict;
+                const command = (match.command || {}) as Dict;
+                return html`<div class="learn-catalog-match">
+                  <div>
+                    <strong>${String(command.name || "Matching command")}</strong>
+                    <span>${String(profile.name || profile.profile_id || "Catalog profile")}</span>
+                  </div>
+                  <ha-button
+                    appearance="outlined"
+                    variant="neutral"
+                    .disabled=${busy}
+                    @click=${() =>
+                      onAction({
+                        type: "learn-catalog-review",
+                        match,
+                      })}
+                  >Review profile</ha-button>
+                </div>`;
+              })}
+              ${
+                catalogReview
+                  ? html`<div class="learn-catalog-review">
+                    <strong>${String(
+                      catalogReview.name ||
+                        catalogReview.model ||
+                        catalogReview.profile_id ||
+                        "Catalog profile",
+                    )}</strong>
+                    <p>${[
+                      catalogReview.brand,
+                      catalogReview.model,
+                      Array.isArray(catalogReview.commands)
+                        ? `${catalogReview.commands.length} commands`
+                        : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}</p>
+                    <div class="learn-match-actions">
+                      <ha-button
+                        appearance="plain"
+                        variant="neutral"
+                        @click=${() =>
+                          onAction({
+                            type: "learn-catalog-review-close",
+                          })}
+                      >Close review</ha-button>
+                    </div>
+                  </div>`
+                  : nothing
+              }
+            </div>
+          </ha-expansion-panel>`
+          : nothing
+      }
       <div class="learn-review-form">
         <ha-input
           autofocus
@@ -432,17 +449,21 @@ export const renderLearnCommandDialog = ({
           @input=${workflowFieldInput(onAction, "command_id")}
         ></ha-input>
       </div>
-      ${!testEmitter
+      ${
+        !testEmitter
         ? renderWorkspaceNotice({
             icon: "mdi:access-point-off",
-            content: "Choose Test with IR emitter in the remote profiles toolbar to test this capture. You can still save it.",
+              content:
+                "Choose Test with IR emitter in the remote profiles toolbar to test this capture. You can still save it.",
           })
         : testEmitter.available
           ? nothing
           : renderWorkspaceNotice({
               icon: "mdi:access-point-off",
-              content: "The selected test IR emitter is unavailable. You can still save the capture.",
-            })}
+                content:
+                  "The selected test IR emitter is unavailable. You can still save the capture.",
+              })
+      }
       <div class="learn-review-actions">
         <ha-button
           appearance="outlined"
@@ -483,16 +504,23 @@ export const renderLearnCommandDialog = ({
             appearance="outlined"
             variant="neutral"
             .disabled=${!preview.code}
-            @click=${() => onAction({
+            @click=${() =>
+              onAction({
               type: "learn-copy-code",
               code: String(preview.code || ""),
             })}
           ><ha-icon slot="start" icon="mdi:content-copy"></ha-icon>Copy raw code</ha-button>
-          <pre><code>${JSON.stringify({
+          <pre><code>${JSON.stringify(
+            {
             format: preview.format,
             signal,
             analysis,
-          }, null, 2)}</code></pre>
+              analysis_error: data.analysis_error || undefined,
+              catalog_matches: catalogMatches,
+            },
+            null,
+            2,
+          )}</code></pre>
         </div>
       </ha-expansion-panel>
       <p class="learn-reassurance">
@@ -510,15 +538,20 @@ export const renderLearnCommandDialog = ({
         .disabled=${!receivers.length}
         @selected=${workflowFieldSelected(onAction, "infrared_receiver_ref")}
       ></ha-select>
-      ${receivers.length
+      ${
+        receivers.length
         ? renderWorkspaceNotice({
             icon: "mdi:information-outline",
-            content: "Imprint could not safely infer a receiver. Choose one for this capture; appliance emitter assignments stay unchanged.",
+              content: data.infrared_receiver_ref
+                ? "A receiver is suggested from the current hardware context. Confirm it or choose another; this selection applies only to this learning session."
+                : "Choose a receiver for this capture. Appliance emitter assignments stay unchanged.",
           })
         : renderWorkspaceNotice({
             icon: "mdi:information-outline",
-            content: "No Home Assistant IR receiver is available. Add or enable a receiver, then reopen this dialog.",
-          })}
+              content:
+                "No Home Assistant IR receiver is available. Add or enable a receiver, then reopen this dialog.",
+            })
+      }
     </section>`;
     footer = renderDialogFooter([
       {

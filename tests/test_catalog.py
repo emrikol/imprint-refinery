@@ -217,6 +217,10 @@ class CatalogTests(unittest.TestCase):
 
         self.assertEqual(result["match_count"], 1)
         self.assertEqual(result["matches"][0]["command"]["command_id"], "power")
+        self.assertEqual(result["matches"][0]["command"]["role"], "power_toggle")
+        self.assertEqual(
+            result["matches"][0]["match_method"], "Timing fingerprint match"
+        )
         self.assertEqual(result["matches"][0]["match_basis"]["type"], "normalized_50us")
         self.assertIn("normalized_50us", result["fingerprints"])
 
@@ -224,6 +228,194 @@ class CatalogTests(unittest.TestCase):
             {"analysis": catalog.analyze_signal(signal)}
         )
         self.assertEqual(from_analysis["fingerprints"], result["fingerprints"])
+
+    def test_command_roles_are_conservative_and_catalog_aligned(self) -> None:
+        for name in ("OFF", "Power_off", "LED_Off", "Off_3"):
+            self.assertEqual(catalog.canonical_command_role(name), "power_off")
+        self.assertEqual(catalog.canonical_command_role("On off"), "power_toggle")
+        self.assertEqual(catalog.canonical_command_role("Standby"), "power_toggle")
+        for name in ("Vol+", "VOL +", "Volume+"):
+            self.assertEqual(catalog.canonical_command_role(name), "volume_up")
+        for name in ("Vol-", "VOL -", "Volume-"):
+            self.assertEqual(catalog.canonical_command_role(name), "volume_down")
+        self.assertEqual(catalog.canonical_command_role("60s_off"), "")
+        self.assertEqual(catalog.canonical_command_role("Display_off"), "")
+
+    def test_appliance_type_prioritizes_without_dropping_unclassified(self) -> None:
+        profile = {
+            **self.artifact.search()[0],
+            "source_path": "Example/Model-1.ir",
+        }
+        self.artifact.match = lambda **_filters: {
+            "match_count": 3,
+            "truncated": False,
+            "matches": [
+                {
+                    "profile": {
+                        **profile,
+                        "profile_id": "receiver",
+                        "category": "receiver",
+                    },
+                    "command": {
+                        "name": "Off",
+                        "record_index": 0,
+                        "record_type": "parsed",
+                    },
+                    "match_basis": {"type": "protocol_address_command"},
+                },
+                {
+                    "profile": {
+                        **profile,
+                        "profile_id": "converted",
+                        "category": "pronto",
+                    },
+                    "command": {
+                        "name": "Off",
+                        "record_index": 0,
+                        "record_type": "parsed",
+                    },
+                    "match_basis": {"type": "protocol_address_command"},
+                },
+                {
+                    "profile": {
+                        **profile,
+                        "profile_id": "television",
+                        "category": "tv",
+                    },
+                    "command": {
+                        "name": "Off",
+                        "record_index": 0,
+                        "record_type": "parsed",
+                    },
+                    "match_basis": {"type": "protocol_address_command"},
+                },
+            ],
+        }
+
+        result = catalog.match_signal(
+            catalog.IRSignal([9000, 4500, 560, 560], 38_000),
+            expected_role="power_off",
+            appliance_type="tv",
+        )
+
+        self.assertEqual(
+            [match["profile"]["profile_id"] for match in result["matches"]],
+            ["television", "converted", "receiver"],
+        )
+        self.assertEqual(
+            [match["appliance_type_match"] for match in result["matches"]],
+            ["selected", "unclassified", "other"],
+        )
+
+    def test_role_filter_is_applied_before_result_limit(self) -> None:
+        profile = {
+            **self.artifact.search()[0],
+            "source_path": "TVs/Example/Model-1.ir",
+        }
+        self.artifact.match = lambda **_filters: {
+            "match_count": 2,
+            "truncated": False,
+            "matches": [
+                {
+                    "profile": {**profile, "profile_id": "wrong"},
+                    "command": {
+                        "name": "Bluetooth",
+                        "record_index": 0,
+                        "record_type": "parsed",
+                    },
+                    "match_basis": {
+                        "type": "protocol_address_command",
+                        "protocol": "NEC",
+                        "address": 0,
+                        "command": 0x47,
+                    },
+                },
+                {
+                    "profile": {**profile, "profile_id": "right"},
+                    "command": {
+                        "name": "LED_Off",
+                        "record_index": 1,
+                        "record_type": "parsed",
+                    },
+                    "match_basis": {
+                        "type": "protocol_address_command",
+                        "protocol": "NEC",
+                        "address": 0,
+                        "command": 0x47,
+                    },
+                },
+            ],
+        }
+
+        result = catalog.match_signal(
+            catalog.IRSignal([9000, 4500, 560, 560], 38_000),
+            limit=1,
+            expected_role="power_off",
+        )
+
+        self.assertEqual(result["profile_ids"], ["right"])
+        self.assertEqual(result["matches"][0]["command"]["name"], "LED_Off")
+        self.assertEqual(
+            result["matches"][0]["match_method"], "Decoded NEC command match"
+        )
+
+    def test_identification_intersects_profiles_and_keeps_capture_evidence(
+        self,
+    ) -> None:
+        def result(*profile_ids: str, command: str) -> dict:
+            return {
+                "catalog": catalog.catalog_status(),
+                "fingerprints": {"normalized_50us": command.lower().ljust(64, "0")},
+                "matches": [
+                    {
+                        "profile": {
+                            "profile_id": profile_id,
+                            "name": profile_id,
+                            "brand": "Example",
+                            "model": profile_id,
+                            "category": "tv",
+                            "command_count": 2,
+                        },
+                        "command": {
+                            "command_id": command.lower(),
+                            "name": command,
+                            "role": "",
+                            "record_index": 0,
+                            "record_type": "parsed",
+                        },
+                        "match_basis": {
+                            "type": "protocol_address_command",
+                            "protocol": "NEC",
+                        },
+                        "match_method": "Decoded NEC command match",
+                    }
+                    for profile_id in profile_ids
+                ],
+            }
+
+        with patch.object(
+            catalog,
+            "match_signal",
+            side_effect=[
+                result("alpha", "shared", command="Off"),
+                result("shared", "omega", command="Blue"),
+            ],
+        ):
+            identified = catalog.identify_signals(
+                [
+                    (catalog.IRSignal([1, 2]), "power_off"),
+                    (catalog.IRSignal([3, 4]), ""),
+                ],
+                appliance_type="light",
+            )
+
+        self.assertEqual(identified["match_count"], 1)
+        self.assertEqual(identified["appliance_type"], "light")
+        self.assertEqual(identified["matches"][0]["profile"]["profile_id"], "shared")
+        self.assertEqual(
+            [item["command"]["name"] for item in identified["matches"][0]["evidence"]],
+            ["Off", "Blue"],
+        )
 
     def test_missing_artifact_is_reported_without_fallback(self) -> None:
         catalog.catalog_status.cache_clear()

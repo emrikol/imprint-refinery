@@ -178,7 +178,7 @@ assert.deepEqual(
   [
     "frontend/components/shared/textarea.ts:<textarea>",
     "frontend/components/signal-lab/waveform.ts:<button>",
-    "frontend/components/workflows/import-signals-dialog.ts:<input>",
+    "frontend/components/shared/file-picker.ts:<input>",
   ].sort(),
   "Generic controls must use the declared HA component boundary. Only explicit browser-native data inputs and IR-specific spatial controls may remain native.",
 );

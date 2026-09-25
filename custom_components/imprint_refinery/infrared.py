@@ -17,6 +17,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    CAPTURE_ARMING_GRACE_SECONDS,
     CONF_CAPTURE_REASSERT_INTERVAL,
     CONF_CAPTURE_TIMEOUT,
     CONF_CLUSTER_ID,
@@ -32,7 +33,7 @@ from .const import (
 from .emitter_identity import normalize_emitter_ref
 from .signal_command import signal_from_infrared_command
 from .zha_bridge import ZhaBridge, find_zha_device
-from .zha_drivers import driver_for_device
+from .zha_drivers import driver_for_device, get_zha_driver
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -135,6 +136,7 @@ class SignalReceiver(_ZhaInfraredEntity, InfraredReceiverEntity):
         super().__init__(bridge, adapter, source_device)
         self._attr_unique_id = f"{normalize_emitter_ref(adapter['ieee'])}_receiver"
         self._capture_task: asyncio.Task[None] | None = None
+        self._restart_capture_when_done = False
         self._subscriber_count = 0
 
     @callback
@@ -157,6 +159,7 @@ class SignalReceiver(_ZhaInfraredEntity, InfraredReceiverEntity):
             unsubscribe()
             self._subscriber_count -= 1
             if self._subscriber_count == 0 and self._capture_task is not None:
+                self._restart_capture_when_done = False
                 self._capture_task.cancel()
 
         return remove_callback
@@ -164,17 +167,34 @@ class SignalReceiver(_ZhaInfraredEntity, InfraredReceiverEntity):
     @callback
     def _ensure_capture_task(self) -> None:
         if self._capture_task is not None and not self._capture_task.done():
+            if self._capture_task.cancelling() and self._subscriber_count:
+                self._restart_capture_when_done = True
             return
-        self._capture_task = self.hass.async_create_task(
+        task = self.hass.async_create_task(
             self._async_capture_once(),
             f"{self.entity_id} infrared capture",
         )
+        self._capture_task = task
+        task.add_done_callback(self._capture_task_done)
+
+    @callback
+    def _capture_task_done(self, task: asyncio.Task[None]) -> None:
+        if self._capture_task is not task:
+            return
+        self._capture_task = None
+        restart = self._restart_capture_when_done
+        self._restart_capture_when_done = False
+        if restart and self._subscriber_count:
+            self._ensure_capture_task()
 
     async def _async_capture_once(self) -> None:
         try:
             signal = await self._bridge.capture(
                 self._adapter,
-                timeout=self._adapter["config"]["capture_timeout"],
+                timeout=(
+                    self._adapter["config"]["capture_timeout"]
+                    + CAPTURE_ARMING_GRACE_SECONDS
+                ),
                 poll_interval=1,
             )
         except asyncio.CancelledError:
@@ -188,12 +208,18 @@ class SignalReceiver(_ZhaInfraredEntity, InfraredReceiverEntity):
                     duration if index % 2 == 0 else -duration
                     for index, duration in enumerate(signal.timings)
                 ],
-                signal.carrier_frequency,
+                (
+                    signal.carrier_frequency
+                    if get_zha_driver(str(self._adapter["driver"])).carrier_source
+                    == "measured"
+                    else None
+                ),
             )
         )
 
     async def async_will_remove_from_hass(self) -> None:
         """Stop vendor learning before unloading the provider entity."""
+        self._restart_capture_when_done = False
         if self._capture_task is not None and not self._capture_task.done():
             self._capture_task.cancel()
             await asyncio.gather(self._capture_task, return_exceptions=True)

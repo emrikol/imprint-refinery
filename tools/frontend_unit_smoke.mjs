@@ -19,6 +19,53 @@ const geometry = await loadModule(
 );
 const comparison = await loadModule("frontend/core/waveform-comparison.ts");
 const homeAssistantUse = await loadModule("frontend/core/home-assistant-use.ts");
+const workflowOptions = await loadModule(
+  "frontend/components/workflows/options.ts",
+);
+const captureTiming = await loadModule("frontend/core/capture-timing.ts");
+
+const captureStart = 1_000_000;
+assert.deepEqual(
+  captureTiming.captureTimingState(captureStart, captureStart, 60),
+  { promptActive: false, remaining: 60, expired: false },
+);
+assert.deepEqual(
+  captureTiming.captureTimingState(captureStart, captureStart + 4_999, 60),
+  { promptActive: false, remaining: 60, expired: false },
+);
+assert.deepEqual(
+  captureTiming.captureTimingState(captureStart, captureStart + 5_000, 60),
+  { promptActive: true, remaining: 60, expired: false },
+);
+assert.deepEqual(
+  captureTiming.captureTimingState(captureStart, captureStart + 15_001, 60),
+  { promptActive: true, remaining: 50, expired: false },
+);
+assert.deepEqual(
+  captureTiming.captureTimingState(captureStart, captureStart + 64_999, 60),
+  { promptActive: true, remaining: 1, expired: false },
+);
+assert.deepEqual(
+  captureTiming.captureTimingState(captureStart, captureStart + 65_000, 60),
+  { promptActive: true, remaining: 0, expired: true },
+);
+
+assert.deepEqual(
+  workflowOptions
+    .identifyCommandRoleOptions("light")
+    .map((option) => option.value),
+  ["", "power_on", "power_off", "power_toggle"],
+);
+assert.ok(
+  workflowOptions
+    .identifyCommandRoleOptions("tv")
+    .some((option) => option.value === "volume_up"),
+);
+assert.ok(
+  !workflowOptions
+    .identifyCommandRoleOptions("fan")
+    .some((option) => option.value === "play"),
+);
 
 const inspector = routes.workspaceRouteFromUrl(
   new URL(
@@ -52,7 +99,38 @@ const signalLab = routes.workspaceRouteFromUrl(
 assert.equal(signalLab.signalLab, true);
 assert.equal(signalLab.signalLabView, "compare");
 assert.equal(signalLab.signalLabTab, "code");
+assert.equal(signalLab.binaryDecoderMode, "auto");
 assert.equal(signalLab.canonicalize, false);
+
+const decodedLab = routes.workspaceRouteFromUrl(
+  new URL(
+    "https://example.invalid/imprint-refinery/remote-profiles/living-room/commands/power/signal-lab/edit/decoded/decoder/pulse-distance",
+  ),
+);
+assert.equal(decodedLab.binaryDecoderMode, "pulse_distance");
+assert.equal(decodedLab.canonicalize, false);
+assert.equal(
+  routes.workspaceUrl(
+    new URL("https://example.invalid/imprint-refinery/remote-profiles"),
+    decodedLab,
+  ),
+  "/imprint-refinery/remote-profiles/living-room/commands/power/signal-lab/edit/decoded/decoder/pulse-distance",
+);
+
+const decodedInspector = routes.workspaceRouteFromUrl(
+  new URL(
+    "https://example.invalid/imprint-refinery/remote-profiles/living-room/commands/power/code/decoder/pulse-width",
+  ),
+);
+assert.equal(decodedInspector.binaryDecoderMode, "pulse_width");
+assert.equal(decodedInspector.canonicalize, false);
+assert.equal(
+  routes.workspaceUrl(
+    new URL("https://example.invalid/imprint-refinery/remote-profiles"),
+    decodedInspector,
+  ),
+  "/imprint-refinery/remote-profiles/living-room/commands/power/code/decoder/pulse-width",
+);
 
 const incompleteLab = routes.workspaceRouteFromUrl(
   new URL(
@@ -127,23 +205,70 @@ assert.equal(
     ),
     oldestInspector,
   ),
-  "/imprint-refinery/remote-profiles/living_room__television/commands/power/history",
+  "/imprint-refinery/remote-profiles/living_room__television/commands/power/history/revision/2",
 );
 
 const oldestLab = routes.workspaceRouteFromUrl(
   new URL(
-    "https://example.invalid/imprint-refinery?screen=lab&location=living_room&appliance=television&command=power&lab_view=compare&lab_tab=code&zoom=4",
+    "https://example.invalid/imprint-refinery?screen=lab&location=living_room&appliance=television&command=power&lab_view=compare&lab_tab=code&decoder=protocol&zoom=4",
   ),
 );
 assert.equal(oldestLab.signalLab, true);
 assert.equal(oldestLab.signalLabView, "compare");
 assert.equal(oldestLab.signalLabTab, "code");
+assert.equal(oldestLab.binaryDecoderMode, "protocol");
 assert.equal(
   routes.workspaceUrl(
-    new URL("https://example.invalid/imprint-refinery?screen=lab&location=living_room&appliance=television&command=power&lab_view=compare&lab_tab=code&zoom=4"),
+    new URL("https://example.invalid/imprint-refinery?screen=lab&location=living_room&appliance=television&command=power&lab_view=compare&lab_tab=code&decoder=protocol&zoom=4"),
     oldestLab,
   ),
-  "/imprint-refinery/remote-profiles/living_room__television/commands/power/signal-lab/compare/code",
+  "/imprint-refinery/remote-profiles/living_room__television/commands/power/signal-lab/compare/code/decoder/protocol/zoom/4",
+);
+
+const fullLabContext = routes.workspaceRouteFromUrl(
+  new URL(
+    "https://example.invalid/imprint-refinery/remote-profiles/living-room/commands/power/signal-lab/edit/code/decoder/pulse-width/format/flipper/zoom/8/pan/0.35/save/overlays",
+  ),
+);
+assert.equal(fullLabContext.codeFormat, "flipper");
+assert.equal(fullLabContext.zoom, 8);
+assert.equal(fullLabContext.pan, 0.35);
+assert.equal(fullLabContext.saveOpen, true);
+assert.equal(fullLabContext.editingOverlays, true);
+assert.equal(fullLabContext.canonicalize, false);
+assert.equal(
+  routes.workspaceUrl(
+    new URL("https://example.invalid/imprint-refinery/remote-profiles"),
+    fullLabContext,
+  ),
+  "/imprint-refinery/remote-profiles/living-room/commands/power/signal-lab/edit/code/decoder/pulse-width/format/flipper/zoom/8/pan/0.35/save/overlays",
+);
+
+const fullInspectorContext = routes.workspaceRouteFromUrl(
+  new URL(
+    "https://example.invalid/imprint-refinery/remote-profiles/living-room/commands/power/history/format/pronto/revision/3",
+  ),
+);
+assert.equal(fullInspectorContext.codeFormat, "pronto");
+assert.equal(fullInspectorContext.selectedRevision, 3);
+assert.equal(fullInspectorContext.canonicalize, false);
+
+const customSignalLab = routes.workspaceRouteFromUrl(
+  new URL(
+    "https://example.invalid/imprint-refinery/remote-profiles/living-room/signal-lab/new/edit/timings/zoom/2",
+  ),
+);
+assert.equal(customSignalLab.signalLab, true);
+assert.equal(customSignalLab.customSignal, true);
+assert.equal(customSignalLab.commandId, "");
+assert.equal(customSignalLab.zoom, 2);
+assert.equal(customSignalLab.canonicalize, false);
+assert.equal(
+  routes.workspaceUrl(
+    new URL("https://example.invalid/imprint-refinery/remote-profiles"),
+    customSignalLab,
+  ),
+  "/imprint-refinery/remote-profiles/living-room/signal-lab/new/edit/timings/zoom/2",
 );
 
 const oldestLibrary = routes.workspaceRouteFromUrl(

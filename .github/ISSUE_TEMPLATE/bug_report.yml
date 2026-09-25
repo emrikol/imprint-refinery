@@ -13,7 +13,7 @@ body:
     id: version
     attributes:
       label: Imprint Refinery version
-      placeholder: 0.1.0
+      placeholder: 0.3.0
     validations:
       required: true
   - type: input
@@ -26,7 +26,7 @@ body:
   - type: input
     id: hardware
     attributes:
-      label: IR blaster
+      label: IR emitter
       description: Include the model and manufacturer shown by Home Assistant.
       placeholder: TS1201 / MOES UFO-R11
     validations:

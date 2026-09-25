@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from homeassistant.components import infrared
-from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import (
     area_registry as ar,
@@ -109,6 +109,7 @@ def discover_infrared_hardware(hass: HomeAssistant) -> dict[str, list[dict[str, 
             else None
         )
         state = hass.states.get(entity_id)
+        last_updated = getattr(state, "last_updated", None)
         name = (
             getattr(entry, "name", None)
             or getattr(entry, "original_name", None)
@@ -123,10 +124,7 @@ def discover_infrared_hardware(hass: HomeAssistant) -> dict[str, list[dict[str, 
             "name": name,
             "available": bool(state is not None and state.state != STATE_UNAVAILABLE),
             "last_activity": (
-                state.state
-                if state is not None
-                and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
-                else None
+                last_updated.isoformat() if last_updated is not None else None
             ),
             "platform": entry.platform,
             "compatibility_adapter": entry.platform == DOMAIN,

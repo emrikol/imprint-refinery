@@ -186,7 +186,7 @@
           if (this.hasAttribute("autofocus")) queueMicrotask(() => input?.focus());
         }
       }
-      if (new URLSearchParams(location.search).get("missingTextarea") !== "1" && new URLSearchParams(location.search).get("view") !== "custom-signal-fallback" && !customElements.get("ha-textarea")) customElements.define("ha-textarea", FixtureHaTextarea);
+      if (new URLSearchParams(location.search).get("missingTextarea") !== "1" && !customElements.get("ha-textarea")) customElements.define("ha-textarea", FixtureHaTextarea);
 
       class FixtureHaSelect extends HTMLElement {
         static get observedAttributes() { return ["label", "helper"]; }

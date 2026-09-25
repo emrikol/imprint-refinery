@@ -1,9 +1,8 @@
 import type { Dict } from "../../types";
+import type { BinaryDecoderMode } from "../../core/utils";
 
 export type WorkspaceView =
-  | "remote_profiles"
-  | "appliances"
-  | "infrared_hardware";
+  "remote_profiles" | "appliances" | "infrared_hardware";
 
 export type InspectorTab = "overview" | "signal" | "code" | "history";
 
@@ -63,13 +62,42 @@ export type InspectorAction =
   | { type: "copy-action"; value: string }
   | { type: "copy-entity-id"; value: string }
   | { type: "copy-code"; value: string }
+  | { type: "copy-timings"; value: string }
+  | { type: "copy-bitstream"; value: string }
+  | { type: "binary-mode-change"; mode: BinaryDecoderMode }
+  | { type: "signal-navigation"; zoom: number; pan: number }
   | { type: "revision-select"; revision: number; label: string }
   | { type: "revision-label-change"; value: string }
-  | { type: "save-revision-label"; profileId: string; commandId: string; revision: number; label: string }
-  | { type: "compare-revision"; profileId: string; commandId: string; revision: number; snapshot: Dict }
-  | { type: "test-revision"; profileId: string; commandId: string; revision: number; snapshot: Dict }
+  | {
+      type: "save-revision-label";
+      profileId: string;
+      commandId: string;
+      revision: number;
+      label: string;
+    }
+  | {
+      type: "compare-revision";
+      profileId: string;
+      commandId: string;
+      revision: number;
+      snapshot: Dict;
+    }
+  | {
+      type: "test-revision";
+      profileId: string;
+      commandId: string;
+      revision: number;
+      snapshot: Dict;
+    }
   | { type: "copy-revision-code"; value: string }
-  | { type: "export-revision"; profileId: string; commandId: string; revision: number; record: Dict }
+  | {
+      type: "export-revision";
+      profileId: string;
+      commandId: string;
+      revision: number;
+      record: Dict;
+    }
+  | { type: "export-command-backup"; profileId: string; commandId: string }
   | {
       type: "code-format-change";
       profileId: string;

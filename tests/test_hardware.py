@@ -1,6 +1,7 @@
 """Live Home Assistant Core infrared inventory tests."""
 
 import asyncio
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from custom_components.imprint_refinery.hardware import (
@@ -46,9 +47,15 @@ def test_core_hardware_inventory_is_live_separate_and_includes_adapters(
     )
     states = {
         emitter.entity_id: SimpleNamespace(
-            state="2026-09-23T12:00:00+00:00", name="Emitter state"
+            state="idle",
+            name="Emitter state",
+            last_updated=datetime(2026, 9, 23, 12, 0, tzinfo=UTC),
         ),
-        receiver.entity_id: SimpleNamespace(state="unavailable", name="Receiver"),
+        receiver.entity_id: SimpleNamespace(
+            state="unavailable",
+            name="Receiver",
+            last_updated=datetime(2026, 9, 23, 11, 0, tzinfo=UTC),
+        ),
     }
     hass = SimpleNamespace(states=SimpleNamespace(get=states.get))
     monkeypatch.setattr(
@@ -92,6 +99,7 @@ def test_core_hardware_inventory_is_live_separate_and_includes_adapters(
     ]
     assert inventory["receivers"][0]["ref"] == "receiver-uuid"
     assert inventory["receivers"][0]["available"] is False
+    assert inventory["receivers"][0]["last_activity"] == "2026-09-23T11:00:00+00:00"
     assert "receiver_entity_id" not in inventory["emitters"][0]
 
     emitter.entity_id = "infrared.after_rename"

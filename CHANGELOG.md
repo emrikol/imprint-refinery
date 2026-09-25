@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.3.0 - 2026-09-24
+
+### Added
+
+- Add multi-button catalog identification. Capture up to eight labeled buttons,
+  intersect their catalog matches, reject duplicate evidence, and prioritize
+  results for the selected appliance type without hiding unclassified profiles.
+- Add complete Signal, Code, and History tools to the command Inspector:
+  waveform navigation and timing copy; the shared Raw bitstream decoder and
+  transmission-order readout; revision metadata, labels, tests, comparisons,
+  exports and restores; and full command backups.
+- Add Broadlink packet decoding for learned HOBEIAN ZG-IR01 signals, including
+  the device's padding-length overcount.
+
+### Changed
+
+- Give receiver capture a separate five-second preparation phase before its
+  full listening countdown, and use the same capture feedback in learning and
+  catalog identification.
+- Open custom signals directly in an editable Signal Lab draft instead of a
+  separate dialog.
+- Preserve complete Inspector and Signal Lab route context, bulk selection and
+  search state across reloads, and retained Signal Lab drafts when another
+  command is opened. Continuous pan and zoom now replace browser history
+  instead of creating a Back entry for every gesture.
+- Report hardware state-update timestamps instead of presenting entity state
+  strings as IR activity.
+- Refresh the public Signal Lab, catalog, learning, and hardware screenshots
+  from deterministic browser fixtures.
+
+### Fixed
+
+- Restore guided catalog matching, profile review and selective imports;
+  file-based format detection and import completion; version 1 backup review,
+  mapping and restore; and canonical permalink state.
+- Preserve captured signals when analysis fails, review duplicate and catalog
+  matches, and save original-plus-optimized signals as two revisions without
+  duplicating the original when an optimized save is retried.
+- Tolerate malformed intermediate HOBEIAN capture payloads and restart learning
+  after cancellation followed by immediate resubscription.
+- Re-resolve stable emitter registry references after entity-ID renames and
+  preserve assumed carrier provenance at the Core infrared boundary.
+- Fall back from stale revision permalinks to the current revision, reject
+  stale asynchronous backup previews, and remove hidden file inputs from the
+  keyboard tab order.
+- Replace multiline catalog choices with reusable, auto-height Home Assistant
+  action tiles, stack them on narrow dialogs, and prevent dialog and revision
+  controls from clipping or overflowing. Selected revisions now inherit Home
+  Assistant's semantic foreground color for accessible contrast.
+
+### Removed
+
+- Remove the standalone custom-signal dialog now that Signal Lab owns that
+  workflow.
+
 ## 0.2.0 - 2026-09-24
 
 ### Breaking changes

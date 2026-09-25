@@ -60,11 +60,15 @@ evidence without changing the protected source signal. Smooth capture jitter
 from measured averages, or preview a canonical rebuild for any recognized
 protocol that supplies a complete encoder.
 
+![Signal Lab waveform editor](docs/images/signal-lab.png)
+
 ### Offline catalog search
 
 Search the bundled offline catalog by category, brand, or model and import a
 matching remote profile without a cloud account. After import, create a new
 appliance from that profile or assign it to an appliance you already added.
+
+![Find remote codes](docs/images/find-remote-codes.png)
 
 ## Requirements
 
@@ -130,6 +134,8 @@ dashboard card, and removal.
 4. Review the captured signal, give it a name, and save it.
 5. Choose **Test with IR emitter** and use **Test once**. This temporary test
    choice never changes an appliance's preferred emitter.
+
+![Learn command capture](docs/images/learn-command.png)
 
 Infrared is one-way. A successful send means Home Assistant handed the signal
 to the emitter; the appliance does not acknowledge it.

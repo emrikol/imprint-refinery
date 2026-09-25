@@ -6,12 +6,13 @@ from typing import Any
 from homeassistant.components.infrared import InfraredEmitterConsumerEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_ON
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_entity_registry_updated_event
 import voluptuous as vol
 
 from .const import DOMAIN, SIGNAL_REGISTRY_UPDATED
@@ -146,6 +147,8 @@ class LibraryEntity(InfraredEmitterConsumerEntity):
 
     def __init__(self, store: SignalLibraryStore, blueprint: EntityBlueprint) -> None:
         self._store = store
+        self._emitter_availability_unsubscribe: CALLBACK_TYPE | None = None
+        self._emitter_registry_unsubscribe: CALLBACK_TYPE | None = None
         self._infrared_emitter_entity_id = (
             _resolve_emitter_entity_id(getattr(store, "hass", None), store, blueprint)
             or "infrared.unassigned"
@@ -170,15 +173,17 @@ class LibraryEntity(InfraredEmitterConsumerEntity):
                 info["via_device_id"] = emitter.device_id
         self._attr_device_info = info
         if self.entity_id is not None:
+            self._async_rebind_emitter()
             self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
         """Fill appliance metadata that DeviceInfo only suggests on first creation."""
-        if self._infrared_emitter_entity_id == "infrared.unassigned":
-            self._attr_available = False
-            await super(InfraredEmitterConsumerEntity, self).async_added_to_hass()
-        else:
-            await super().async_added_to_hass()
+        # Core's consumer base binds availability to the entity ID that exists when
+        # the entity is added. Imprint stores the Entity Registry UUID instead, so it
+        # must own that subscription in order to re-resolve entity-ID renames.
+        await super(InfraredEmitterConsumerEntity, self).async_added_to_hass()
+        self.async_on_remove(self._async_unsubscribe_emitter)
+        self._async_rebind_emitter()
         if getattr(self, "hass", None) is None:
             return
         devices = dr.async_get(self.hass)
@@ -200,7 +205,59 @@ class LibraryEntity(InfraredEmitterConsumerEntity):
         """Return the stable emitter reference used to detect route changes."""
         return self._blueprint.emitter
 
+    @callback
+    def _async_unsubscribe_emitter(self) -> None:
+        """Stop availability and registry tracking for the resolved emitter ID."""
+        if self._emitter_availability_unsubscribe is not None:
+            self._emitter_availability_unsubscribe()
+            self._emitter_availability_unsubscribe = None
+        if self._emitter_registry_unsubscribe is not None:
+            self._emitter_registry_unsubscribe()
+            self._emitter_registry_unsubscribe = None
+
+    @callback
+    def _async_rebind_emitter(self) -> bool:
+        """Resolve the stable emitter reference and track its current entity ID."""
+        resolved = (
+            _resolve_emitter_entity_id(
+                getattr(self._store, "hass", None), self._store, self._blueprint
+            )
+            or "infrared.unassigned"
+        )
+        if resolved == self._infrared_emitter_entity_id:
+            if resolved == "infrared.unassigned":
+                self._attr_available = False
+                return False
+            if self._emitter_availability_unsubscribe is not None:
+                return False
+
+        previous = self._infrared_emitter_entity_id
+        self._async_unsubscribe_emitter()
+        self._infrared_emitter_entity_id = resolved
+        if resolved == "infrared.unassigned" or self.entity_id is None:
+            self._attr_available = False
+            return resolved != previous
+
+        self._emitter_availability_unsubscribe = self._async_track_availability(
+            resolved
+        )
+        self._emitter_registry_unsubscribe = async_track_entity_registry_updated_event(
+            self.hass, resolved, self._async_emitter_registry_updated
+        )
+        return resolved != previous
+
+    @callback
+    def _async_emitter_registry_updated(self, event: Any) -> None:
+        """Rebind availability and delivery after an emitter entity-ID rename."""
+        del event
+        if self._async_rebind_emitter():
+            self.async_write_ha_state()
+
     async def async_send_stored_command(self, command_id: str) -> None:
+        # Resolve again at the delivery boundary so a registry rename cannot race
+        # the registry-event callback and send to the old entity ID.
+        if self._async_rebind_emitter() and self.entity_id is not None:
+            self.async_write_ha_state()
         if self._infrared_emitter_entity_id == "infrared.unassigned":
             raise ServiceValidationError(
                 f"IR device {self._blueprint.registry_device_key} has no assigned infrared emitter"

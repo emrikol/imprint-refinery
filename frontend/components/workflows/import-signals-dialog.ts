@@ -1,6 +1,7 @@
 import { css, html, nothing, type TemplateResult } from "lit";
 import type { Dict, RemoteProfileData } from "../../types";
 import { renderDialogFooter, renderDialogShell } from "../shared/dialog";
+import { renderFilePicker } from "../shared/file-picker";
 import { renderTextarea } from "../shared/textarea";
 import { renderWorkspaceNotice } from "../shared/workspace-notice";
 import {
@@ -22,10 +23,28 @@ export const importSignalsDialogStyles = css`
   .imprint-import-preview-item {
     padding: 12px;
     display: grid;
-    gap: 3px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 12px;
+    align-items: start;
   }
-  .imprint-file-picker { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .imprint-file-picker input { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; pointer-events: none; }
+  .imprint-import-preview-item > div { display: grid; gap: 3px; min-width: 0; }
+  .imprint-import-preview-item span { overflow-wrap: anywhere; }
+  .imprint-import-preview-item details { grid-column: 1 / -1; min-width: 0; }
+  .imprint-import-preview-item summary { cursor: pointer; }
+  .imprint-import-preview-item pre {
+    overflow: auto;
+    margin: 8px 0 0;
+    padding: 10px;
+    border-radius: 8px;
+    background: var(--secondary-background-color);
+    font: 13px/1.45 var(--code-font-family, monospace);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .imprint-import-status { font-weight: 600; }
+  .imprint-import-status.ready { color: var(--imprint-success); }
+  .imprint-import-status.warning { color: var(--imprint-warning); }
+  .imprint-import-detail-list { margin: 8px 0 0; padding-inline-start: 22px; }
 `;
 
 export const renderImportSignalsDialog = ({
@@ -37,31 +56,24 @@ export const renderImportSignalsDialog = ({
 }: ImportSignalsDialogOptions): TemplateResult => {
   const preview = (data.preview || null) as Dict | null;
   const commands = (preview?.commands || []) as Dict[];
-  const compatibleCommands = commands.filter((command) => command.compatible !== false);
-  const commandCount = Number(preview?.command_count || commands.length || 0);
-  const chooseFile = (event: Event): void => {
-    const input = event.currentTarget as HTMLElement;
-    input.closest(".imprint-file-picker")?.querySelector<HTMLInputElement>("input")?.click();
-  };
-  const readFile = async (event: Event): Promise<void> => {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    try {
+  const compatibleCommands = commands.filter(
+    (command) => command.compatible !== false,
+  );
+  const unsupportedCommands = (preview?.unsupported_commands || []) as Dict[];
+  const lossyCommands = compatibleCommands.filter(
+    (command) => (command.loss_report as Dict | undefined)?.lossless === false,
+  );
+  const readFile = async (file: File): Promise<void> => {
       const value = await file.text();
       onAction({ type: "field-change", field: "code", value });
       onAction({ type: "field-change", field: "file_name", value: file.name });
       onAction({ type: "field-change", field: "format", value: "auto" });
       onAction({ type: "field-change", field: "preview", value: null });
-    } catch {
-      onAction({ type: "import-file-error", message: "The selected file could not be read." });
-    } finally {
-      input.value = "";
-    }
   };
   return renderDialogShell({
     heading: "Import IR signals",
-    description: "Preview first. Multi-command files are added to one reusable remote profile.",
+    description:
+      "Preview first. Multi-command files are added to one reusable remote profile.",
     error,
     busy,
     workflow: "import-signals",
@@ -80,11 +92,19 @@ export const renderImportSignalsDialog = ({
           { value: "raw_unsigned", label: "Raw unsigned timings" },
           { value: "zosung_base64", label: "Zosung Base64" },
         ]} @selected=${workflowFieldSelected(onAction, "format")}></ha-select>
-        <div class="imprint-file-picker imprint-workflow-wide">
-          <input type="file" accept=".json,.ir,.xml,.conf,.txt,application/json,text/plain,application/xml,text/xml" @change=${readFile}>
-          <ha-button variant="neutral" appearance="outlined" @click=${chooseFile}><ha-icon slot="start" icon="mdi:file-upload-outline"></ha-icon>Choose file</ha-button>
-          <span class="muted">${data.file_name ? String(data.file_name) : "Or paste signal data below"}</span>
-        </div>
+        ${renderFilePicker({
+          accept:
+            ".json,.ir,.xml,.conf,.txt,application/json,text/plain,application/xml,text/xml",
+          buttonLabel: "Choose file",
+          emptyLabel: "Or paste signal data below",
+          selectedName: String(data.file_name || ""),
+          className: "imprint-workflow-wide",
+          disabled: busy,
+          onFile: readFile,
+          onError: (message) =>
+            onAction({ type: "import-file-error", message }),
+          errorMessage: "The selected file could not be read.",
+        })}
         ${renderTextarea({
           className: "imprint-workflow-wide",
           label: "Signal data",
@@ -98,29 +118,89 @@ export const renderImportSignalsDialog = ({
       <div class="imprint-workflow-inline-actions">
         <ha-button variant="neutral" appearance="outlined" .disabled=${busy || !data.remote_profile_id || !String(data.code || "").trim()} @click=${() => onAction({ type: "import-preview" })}>Preview import</ha-button>
       </div>
-      ${preview ? html`
+      ${
+        preview
+          ? html`
         <div class="imprint-workflow-stack">
           ${renderWorkspaceNotice({
             icon: "mdi:file-check-outline",
             role: "status",
-            content: `${commandCount} compatible command${commandCount === 1 ? "" : "s"}${preview.unsupported_count ? ` · ${preview.unsupported_count} unsupported` : ""}`,
+            content: `${compatibleCommands.length} compatible command${compatibleCommands.length === 1 ? "" : "s"}${preview.unsupported_count ? ` · ${preview.unsupported_count} unsupported` : ""}${lossyCommands.length ? ` · ${lossyCommands.length} with documented representation loss` : ""}`,
           })}
-          <span class="muted">Detected format: ${String(preview.format || data.format || "unknown")}</span>
+          <span class="muted">Detected format: ${String(preview.format || data.format || "unknown")}${data.file_name ? ` · ${String(data.file_name)}` : ""}</span>
           <div class="imprint-workflow-stack">
             ${commands.map((command) => {
               const analysis = (command.analysis || {}) as Dict;
+              const signal = (command.signal || {}) as Dict;
+              const loss = (command.loss_report || {}) as Dict;
+              const losses = Array.isArray(loss.losses)
+                ? loss.losses.map(String)
+                : [];
+              const source = (command.source ||
+                command.backup_origin ||
+                {}) as Dict;
+              const compatible = command.compatible !== false;
               return html`
                 <div class="panel imprint-import-preview-item">
+                  <div>
                   <strong>${command.name || command.command_id}</strong>
-                  <span class="muted">${analysis.protocol || command.format || "Raw timing"}</span>
+                    <span class="muted">${[
+                      analysis.protocol || command.format || "Raw timing",
+                      signal.carrier_frequency
+                        ? `${(Number(signal.carrier_frequency) / 1000).toFixed(1)} kHz`
+                        : "Carrier not reported",
+                    ].join(" · ")}</span>
+                    ${
+                      !compatible
+                        ? html`<span class="muted">${command.compatibility_error || "Unsupported representation"}</span>`
+                        : nothing
+                    }
+                  </div>
+                  <span class=${`imprint-import-status ${compatible ? "ready" : "warning"}`}>
+                    ${compatible ? "Ready" : "Skipped"}
+                  </span>
+                  ${
+                    loss.lossless === false || Object.keys(source).length
+                      ? html`
+                    <details>
+                      <summary>Conversion and provenance details</summary>
+                      ${
+                        loss.lossless === false
+                          ? html`
+                        <ul class="imprint-import-detail-list">
+                          ${losses.map((item) => html`<li>${item.replaceAll("_", " ")}</li>`)}
+                          ${loss.maximum_timing_error_us ? html`<li>Maximum timing change: ${Number(loss.maximum_timing_error_us)} µs</li>` : nothing}
+                          ${loss.carrier_error_hz ? html`<li>Carrier change: ${Number(loss.carrier_error_hz)} Hz</li>` : nothing}
+                        </ul>
+                      `
+                          : html`<p class="muted">No representation loss was reported.</p>`
+                      }
+                      <pre>${JSON.stringify(source, null, 2)}</pre>
+                    </details>
+                  `
+                      : nothing
+                  }
                 </div>
               `;
             })}
           </div>
+          ${
+            unsupportedCommands.length
+              ? renderWorkspaceNotice({
+                  tone: "warning",
+                  role: "alert",
+                  icon: "mdi:alert-outline",
+                  content: html`<div><strong>${unsupportedCommands.length} unsupported command${unsupportedCommands.length === 1 ? "" : "s"} will be skipped</strong><ul class="imprint-import-detail-list">${unsupportedCommands.map((command) => html`<li><strong>${command.name || "Unnamed command"}:</strong> ${command.error || command.compatibility_error || "Unsupported representation"}${command.source ? ` · ${String(command.source)}` : ""}</li>`)}</ul></div>`,
+                })
+              : nothing
+          }
         </div>
-      ` : nothing}
+      `
+          : nothing
+      }
     `,
-    footer: preview ? renderDialogFooter([
+    footer: preview
+      ? renderDialogFooter([
       {
         label: "Import commands",
         variant: "brand",
@@ -128,6 +208,7 @@ export const renderImportSignalsDialog = ({
         disabled: busy || !compatibleCommands.length,
         onClick: () => onAction({ type: "import-commands" }),
       },
-    ]) : nothing,
+        ])
+      : nothing,
   });
 };

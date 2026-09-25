@@ -24,6 +24,10 @@ DEFAULT_ENDPOINT_ID = 1
 DEFAULT_CLUSTER_ID = 0xE004
 DEFAULT_CAPTURE_TIMEOUT = 60
 DEFAULT_CAPTURE_REASSERT_INTERVAL = 8
+# Core's receiver subscription has no readiness event. This margin lets the
+# compatibility provider enter learning mode before the requested listening
+# window consumes the outer service deadline.
+CAPTURE_ARMING_GRACE_SECONDS = 5
 
 # Stable machine-readable failures. These are intentionally terse translation keys.
 ERROR_CATALOG_UNAVAILABLE = "catalog_unavailable"

@@ -3,6 +3,11 @@ import type { DialogState } from "../components/workflows/render";
 import { errorMessage, slugify } from "../core/utils";
 import type { CommandData, Dict, RegistryData } from "../types";
 
+export interface CustomSignalBootstrap {
+  timings?: number[];
+  carrierFrequency?: number;
+}
+
 export interface WorkflowHost {
   call(action: string, data?: Dict): Promise<any>;
   run(operation: () => Promise<void>, success?: string): Promise<void>;
@@ -16,10 +21,17 @@ export interface WorkflowHost {
   clearCommandSelection(): void;
   openCommand(profileId: string, commandId: string): Promise<void>;
   showInspectorHistory(): void;
-  changeView(view: "remote_profiles" | "appliances", selectionId?: string): void;
+  changeView(
+    view: "remote_profiles" | "appliances",
+    selectionId?: string,
+  ): void;
   setError(message: string): void;
   copyText(value: string, success?: string): Promise<void>;
   reload(): Promise<void>;
+  openCustomSignalDraft?(
+    profileId: string,
+    bootstrap?: CustomSignalBootstrap,
+  ): void;
 }
 
 /** Owns temporary workflow state and service orchestration for workspace dialogs. */
@@ -27,8 +39,10 @@ export class WorkflowController {
   private current: DialogState | null = null;
   private capturingReceiverRef = "";
   private learnSequence = 0;
+  private backupReviewSequence = 0;
   private guidedCooldownTimer?: number;
-  private static readonly guidedSessionKey = "imprint-refinery.guided-session-id";
+  private static readonly guidedSessionKey =
+    "imprint-refinery.guided-session-id";
 
   constructor(private readonly host: WorkflowHost) {}
 
@@ -107,7 +121,7 @@ export class WorkflowController {
       kind: "learn",
       title: "Learn command",
       data: {
-        stage: receiver ? "waiting" : "choose",
+        stage: "choose",
         remote_profile_id: profileId,
         infrared_receiver_ref: receiver,
         name: command?.name || "",
@@ -117,7 +131,6 @@ export class WorkflowController {
         idTouched: Boolean(command),
       },
     });
-    if (receiver) void this.captureLearn();
   }
 
   openRelearn(
@@ -128,19 +141,20 @@ export class WorkflowController {
     this.openLearnSession(profileId, commandId, command);
   }
 
-  openCustomSignal(profileId?: string): void {
-    this.setDialog({
-      kind: "custom-signal",
-      title: "Create custom signal",
-      data: {
-        remote_profile_id: profileId || this.firstProfileId(),
-        name: "",
-        command_id: "",
-        code: "",
-        format: "raw_signed",
-        role: "",
-      },
-    });
+  openCustomSignal(profileId = ""): void {
+    const targetProfileId = profileId || this.firstProfileId();
+    if (!targetProfileId) {
+      this.host.setError(
+        "Add a remote profile before creating a custom signal.",
+      );
+      return;
+    }
+    if (!this.host.openCustomSignalDraft) {
+      this.host.setError("Signal Lab is not available in this view.");
+      return;
+    }
+    this.setDialog(null);
+    this.host.openCustomSignalDraft(targetProfileId);
   }
 
   openCommandEdit(profileId: string, commandId: string): void {
@@ -170,7 +184,8 @@ export class WorkflowController {
     const targetProfileId =
       profileIds.find(
         (candidate) =>
-          candidate !== profileId && !profiles[candidate]?.commands?.[commandId],
+          candidate !== profileId &&
+          !profiles[candidate]?.commands?.[commandId],
       ) ||
       profileIds.find((candidate) => candidate !== profileId) ||
       profileId;
@@ -210,17 +225,18 @@ export class WorkflowController {
 
   openMoveCommands(profileId: string, commandIds: string[]): void {
     const profiles = this.host.registry().remote_profiles || {};
-    const uniqueIds = [...new Set(commandIds)].filter(
-      (commandId) => Boolean(profiles[profileId]?.commands?.[commandId]),
+    const uniqueIds = [...new Set(commandIds)].filter((commandId) =>
+      Boolean(profiles[profileId]?.commands?.[commandId]),
     );
     if (!uniqueIds.length) return;
-    const targetProfileId = Object.keys(profiles).find(
-      (candidate) =>
-        candidate !== profileId &&
-        uniqueIds.every(
-          (commandId) => !profiles[candidate]?.commands?.[commandId],
-        ),
-    ) || "";
+    const targetProfileId =
+      Object.keys(profiles).find(
+        (candidate) =>
+          candidate !== profileId &&
+          uniqueIds.every(
+            (commandId) => !profiles[candidate]?.commands?.[commandId],
+          ),
+      ) || "";
     this.setDialog({
       kind: "command-move",
       title: "Move commands",
@@ -245,6 +261,12 @@ export class WorkflowController {
         results: [],
         infrared_emitter_ref: emitterRef,
         infrared_receiver_ref: this.suggestedReceiver(""),
+        identify_appliance_type: "generic",
+        identify_role: "",
+        identify_captures: [],
+        identify_capture_summaries: [],
+        identify_results: [],
+        identify_snapshots: [],
       },
     });
     void this.resumeGuidedSession();
@@ -272,7 +294,9 @@ export class WorkflowController {
         remote_profile_id: remoteProfileId || "",
         export_value: "",
         restore_value: "",
+        restore_file_name: "",
         restore_document: null,
+        restore_preview: null,
         restore_mappings: {},
       },
     });
@@ -293,10 +317,7 @@ export class WorkflowController {
     });
   }
 
-  confirmRemove(
-    kind: "profile" | "appliance" | "command",
-    data: Dict,
-  ): void {
+  confirmRemove(kind: "profile" | "appliance" | "command", data: Dict): void {
     const copy = {
       profile: {
         title: "Delete remote profile?",
@@ -315,13 +336,17 @@ export class WorkflowController {
       },
     }[kind];
     const profileId = String(data.remote_profile_id || "");
-    const dependentNames = kind === "profile"
-      ? (this.host.registry().remote_profiles?.[profileId]
-          ?.dependent_appliance_ids || []).map(
-          (applianceId) =>
-            this.host.registry().appliances?.[applianceId]?.name || applianceId,
-        )
-      : [];
+    const dependentNames =
+      kind === "profile"
+        ? (
+            this.host.registry().remote_profiles?.[profileId]
+              ?.dependent_appliance_ids || []
+          ).map(
+            (applianceId) =>
+              this.host.registry().appliances?.[applianceId]?.name ||
+              applianceId,
+          )
+        : [];
     this.setDialog({
       kind: "confirm",
       title: copy.title,
@@ -344,7 +369,8 @@ export class WorkflowController {
     revision: number,
     snapshot: Dict,
   ): void {
-    const command = this.host.registry().remote_profiles?.[profileId]?.commands?.[commandId];
+    const command =
+      this.host.registry().remote_profiles?.[profileId]?.commands?.[commandId];
     const currentSignal = (command?.signal || {}) as Dict;
     const revisionSignal = (snapshot.signal || {}) as Dict;
     this.setDialog({
@@ -360,14 +386,16 @@ export class WorkflowController {
           timings: Array.isArray(currentSignal.timings)
             ? currentSignal.timings.map(Number)
             : [],
-          carrierFrequency: Number(currentSignal.carrier_frequency || 0) || null,
+          carrierFrequency:
+            Number(currentSignal.carrier_frequency || 0) || null,
         },
         comparison_after: {
           label: `Revision ${revision}`,
           timings: Array.isArray(revisionSignal.timings)
             ? revisionSignal.timings.map(Number)
             : [],
-          carrierFrequency: Number(revisionSignal.carrier_frequency || 0) || null,
+          carrierFrequency:
+            Number(revisionSignal.carrier_frequency || 0) || null,
         },
       },
       confirmAction: "restore-revision",
@@ -380,7 +408,8 @@ export class WorkflowController {
     revision: number,
     snapshot: Dict,
   ): void {
-    const command = this.host.registry().remote_profiles?.[profileId]?.commands?.[commandId];
+    const command =
+      this.host.registry().remote_profiles?.[profileId]?.commands?.[commandId];
     const currentSignal = (command?.signal || {}) as Dict;
     const revisionSignal = (snapshot.signal || {}) as Dict;
     this.setDialog({
@@ -390,13 +419,19 @@ export class WorkflowController {
         text: "Both waveforms share one time axis and cursor so timing changes stay aligned.",
         comparison_before: {
           label: `Current revision ${command?.current_revision || ""}`.trim(),
-          timings: Array.isArray(currentSignal.timings) ? currentSignal.timings.map(Number) : [],
-          carrierFrequency: Number(currentSignal.carrier_frequency || 0) || null,
+          timings: Array.isArray(currentSignal.timings)
+            ? currentSignal.timings.map(Number)
+            : [],
+          carrierFrequency:
+            Number(currentSignal.carrier_frequency || 0) || null,
         },
         comparison_after: {
           label: `Revision ${revision}`,
-          timings: Array.isArray(revisionSignal.timings) ? revisionSignal.timings.map(Number) : [],
-          carrierFrequency: Number(revisionSignal.carrier_frequency || 0) || null,
+          timings: Array.isArray(revisionSignal.timings)
+            ? revisionSignal.timings.map(Number)
+            : [],
+          carrierFrequency:
+            Number(revisionSignal.carrier_frequency || 0) || null,
         },
       },
     });
@@ -405,7 +440,18 @@ export class WorkflowController {
   updateField(field: string, value: unknown): void {
     const dialog = this.current;
     if (!dialog) return;
+    if (
+      dialog.kind === "catalog" &&
+      field === "identify_appliance_type" &&
+      Array.isArray(dialog.data.identify_captures) &&
+      dialog.data.identify_captures.length
+    ) {
+      return;
+    }
     const data = { ...dialog.data, [field]: value };
+    if (dialog.kind === "catalog" && field === "identify_appliance_type") {
+      data.identify_role = "";
+    }
     if (field === "name" && !data.editing && !data.idTouched) {
       if (dialog.kind === "profile") {
         data.remote_profile_id = slugify(String(value));
@@ -413,7 +459,7 @@ export class WorkflowController {
       if (dialog.kind === "appliance") {
         data.appliance_id = slugify(String(value));
       }
-      if (["learn", "custom-signal"].includes(dialog.kind)) {
+      if (dialog.kind === "learn") {
         data.command_id = slugify(String(value));
       }
     }
@@ -482,6 +528,16 @@ export class WorkflowController {
       void this.host.copyText(detail.code, "Captured signal code copied.");
     } else if (detail.type === "learn-save") {
       void this.saveLearnCapture(detail.another);
+    } else if (detail.type === "learn-duplicate-open") {
+      void this.openLearnDuplicate(detail.match);
+    } else if (detail.type === "learn-duplicate-replace") {
+      this.replaceLearnDuplicate(detail.match);
+    } else if (detail.type === "learn-duplicate-ignore") {
+      this.updateField("duplicate_match", null);
+    } else if (detail.type === "learn-catalog-review") {
+      void this.reviewLearnCatalogMatch(detail.match);
+    } else if (detail.type === "learn-catalog-review-close") {
+      this.updateField("catalog_match_review", null);
     } else if (detail.type === "move-create-profile") {
       this.setDialog(null);
       this.openProfile();
@@ -491,6 +547,10 @@ export class WorkflowController {
       this.updateField("mode", detail.mode);
     } else if (detail.type === "catalog-identify") {
       void this.identifyCatalogSignal();
+    } else if (detail.type === "catalog-identify-remove-last") {
+      this.removeLastCatalogIdentification();
+    } else if (detail.type === "catalog-identify-reset") {
+      this.resetCatalogIdentification();
     } else if (detail.type === "catalog-cancel-capture") {
       void this.cancelCatalogCapture();
     } else if (detail.type === "catalog-guided-start") {
@@ -501,8 +561,20 @@ export class WorkflowController {
       void this.answerGuidedCatalog(detail.result);
     } else if (detail.type === "catalog-guided-control") {
       void this.controlGuidedCatalog(detail.command);
+    } else if (detail.type === "catalog-preview") {
+      void this.previewCatalogProfile(detail.profile);
+    } else if (detail.type === "catalog-profile-back") {
+      this.closeCatalogProfilePreview();
+    } else if (detail.type === "catalog-selection-change") {
+      this.changeCatalogSelection(detail.commandId, detail.selected);
+    } else if (detail.type === "catalog-test-command") {
+      void this.testCatalogCommand(detail.command);
     } else if (detail.type === "catalog-import") {
-      void this.importCatalogProfile(detail.profile);
+      void this.importCatalogProfile(
+        detail.profile,
+        detail.commandIds,
+        detail.mode,
+      );
     } else if (detail.type === "catalog-create-appliance") {
       const profileId = detail.profileId;
       this.setDialog(null);
@@ -518,7 +590,7 @@ export class WorkflowController {
     } else if (detail.type === "backup-copy") {
       void this.host.copyText(detail.value, "Copied Imprint backup.");
     } else if (detail.type === "backup-review") {
-      this.reviewRestore();
+      void this.reviewRestore();
     } else if (detail.type === "backup-mapping-change") {
       this.setRestoreMapping(detail.applianceId, detail.field, detail.value);
     } else if (detail.type === "backup-restore") {
@@ -534,16 +606,19 @@ export class WorkflowController {
       );
       return;
     }
-    await this.host.run(async () => {
-      await this.host.call("send_signal", {
-        infrared_emitter_ref: emitterRef,
-        code: command.code,
-        format: command.format || "raw_signed",
-        ...(command.signal?.carrier_frequency
-          ? { carrier_frequency: command.signal.carrier_frequency }
-          : {}),
-      });
-    }, `Sent ${command.name || "command"} once from ${this.profileName(profileId)}.`);
+    await this.host.run(
+      async () => {
+        await this.host.call("send_signal", {
+          infrared_emitter_ref: emitterRef,
+          code: command.code,
+          format: command.format || "raw_signed",
+          ...(command.signal?.carrier_frequency
+            ? { carrier_frequency: command.signal.carrier_frequency }
+            : {}),
+        });
+      },
+      `Sent ${command.name || "command"} once from ${this.profileName(profileId)}.`,
+    );
   }
 
   private setDialog(dialog: DialogState | null): void {
@@ -561,9 +636,9 @@ export class WorkflowController {
   }
 
   private availableEmitterRef(): string {
-    const emitters = (this.host.registry().infrared_hardware?.emitters || []).filter(
-      (item) => item.available,
-    );
+    const emitters = (
+      this.host.registry().infrared_hardware?.emitters || []
+    ).filter((item) => item.available);
     return emitters.length === 1 ? emitters[0].ref : "";
   }
 
@@ -604,11 +679,12 @@ export class WorkflowController {
     if (selectedMatch) return selectedMatch;
     const deviceIds = new Set(
       (registry.remote_profiles?.[profileId]?.dependent_appliance_ids || [])
-        .map((id) =>
-          (hardware?.emitters || []).find(
-            (item) =>
-              item.ref === registry.appliances?.[id]?.infrared_emitter_ref,
-          )?.device_id,
+        .map(
+          (id) =>
+            (hardware?.emitters || []).find(
+              (item) =>
+                item.ref === registry.appliances?.[id]?.infrared_emitter_ref,
+            )?.device_id,
         )
         .filter((id): id is string => Boolean(id)),
     );
@@ -619,19 +695,30 @@ export class WorkflowController {
     return receivers.length === 1 ? receivers[0].ref : "";
   }
 
-  private reviewRestore(): void {
+  private async reviewRestore(): Promise<void> {
     const dialog = this.current;
     if (!dialog || dialog.kind !== "backup") return;
-    try {
-      const document = JSON.parse(String(dialog.data.restore_value || ""));
-      if (!document || typeof document !== "object" || !document.remote_profiles) {
+    const restoreValue = String(dialog.data.restore_value || "");
+    const sequence = ++this.backupReviewSequence;
+    await this.host.run(async () => {
+      const document = JSON.parse(restoreValue) as Dict;
+      const preview = await this.host.call("inspect_import", {
+        code: restoreValue,
+        format: "native_json",
+        name: "Imprint backup",
+      });
+      if (
+        !document ||
+        typeof document !== "object" ||
+        preview.format !== "native_json" ||
+        !preview.remote_profiles
+      )
         throw new Error("This is not an Imprint Refinery backup.");
-      }
       const registry = this.host.registry();
       const emitters = registry.infrared_hardware?.emitters || [];
       const onlyEmitter = emitters.length === 1 ? emitters[0].ref : "";
       const mappings: Dict = {};
-      for (const [id, appliance] of Object.entries(document.appliances || {})) {
+      for (const [id, appliance] of Object.entries(preview.appliances || {})) {
         const current = registry.appliances?.[id];
         const suggestedArea = String(
           (appliance as Dict).area_name || "",
@@ -641,22 +728,26 @@ export class WorkflowController {
         );
         mappings[id] = {
           area_id: current?.area?.area_id || area?.area_id || "",
-          infrared_emitter_ref:
-            current?.infrared_emitter_ref || onlyEmitter,
+          infrared_emitter_ref: current?.infrared_emitter_ref || onlyEmitter,
         };
       }
+      if (
+        sequence !== this.backupReviewSequence ||
+        this.current?.kind !== "backup" ||
+        String(this.current.data.restore_value || "") !== restoreValue
+      )
+        return;
       this.setDialog({
-        ...dialog,
+        ...this.current,
         data: {
-          ...dialog.data,
+          ...this.current.data,
           restore_document: document,
+          restore_preview: preview,
           restore_mappings: mappings,
         },
       });
       this.host.setError("");
-    } catch (error) {
-      this.host.setError(errorMessage(error));
-    }
+    });
   }
 
   private setRestoreMapping(
@@ -687,8 +778,10 @@ export class WorkflowController {
       this.host.setError("Review the backup before restoring it.");
       return;
     }
+    const preview = (dialog.data.restore_preview || document) as Dict;
     const mappings = (dialog.data.restore_mappings || {}) as Dict<Dict>;
-    const missingEmitter = Object.keys((document.appliances as Dict) || {}).find(
+    const applianceIds = Object.keys((preview.appliances as Dict) || {});
+    const missingEmitter = applianceIds.find(
       (id) => !String(mappings[id]?.infrared_emitter_ref || ""),
     );
     if (missingEmitter) {
@@ -697,7 +790,7 @@ export class WorkflowController {
     }
     await this.host.run(async () => {
       await this.host.call("import_backup", { code: JSON.stringify(document) });
-      for (const id of Object.keys((document.appliances as Dict) || {})) {
+      for (const id of applianceIds) {
         await this.host.call("update_appliance", {
           appliance_id: id,
           area_id: String(mappings[id]?.area_id || ""),
@@ -740,41 +833,47 @@ export class WorkflowController {
       (command: any) => command.compatible !== false,
     );
     if (!profileId || !commands.length) return;
-    await this.host.run(async () => {
-      const existing = new Set(
-        Object.keys(
-          this.host.registry().remote_profiles?.[profileId]?.commands || {},
-        ),
-      );
-      for (const command of commands) {
-        let commandId =
-          slugify(String(command.command_id || command.name || "command")) ||
-          "command";
-        const base = commandId;
-        let suffix = 2;
-        while (existing.has(commandId)) commandId = `${base}_${suffix++}`;
-        existing.add(commandId);
-        if (command.native_command) {
-          await this.host.call("import_command_backup", {
-            remote_profile_id: profileId,
-            command_id: commandId,
-            payload: command.native_command,
-          });
-        } else {
-          await this.host.call("store_command", {
-            remote_profile_id: profileId,
-            command_id: commandId,
-            name: command.name || commandId,
-            code: command.code,
-            format: command.format || "raw_signed",
-            role: command.role || "",
-            source: command.source || { type: "import", format: preview.format || data.format },
-          });
+    await this.host.run(
+      async () => {
+        const existing = new Set(
+          Object.keys(
+            this.host.registry().remote_profiles?.[profileId]?.commands || {},
+          ),
+        );
+        for (const command of commands) {
+          let commandId =
+            slugify(String(command.command_id || command.name || "command")) ||
+            "command";
+          const base = commandId;
+          let suffix = 2;
+          while (existing.has(commandId)) commandId = `${base}_${suffix++}`;
+          existing.add(commandId);
+          if (command.native_command) {
+            await this.host.call("import_command_backup", {
+              remote_profile_id: profileId,
+              command_id: commandId,
+              payload: command.native_command,
+            });
+          } else {
+            await this.host.call("store_command", {
+              remote_profile_id: profileId,
+              command_id: commandId,
+              name: command.name || commandId,
+              code: command.code,
+              format: command.format || "raw_signed",
+              role: command.role || "",
+              source: command.source || {
+                type: "import",
+                format: preview.format || data.format,
+              },
+            });
+          }
         }
-      }
-      this.setDialog(null);
-      await this.host.reload();
-    }, `Imported ${commands.length} command${commands.length === 1 ? "" : "s"}.`);
+        this.setDialog(null);
+        await this.host.reload();
+      },
+      `Imported ${commands.length} command${commands.length === 1 ? "" : "s"}.`,
+    );
   }
 
   private async searchCatalog(): Promise<void> {
@@ -802,7 +901,9 @@ export class WorkflowController {
 
   private guidedSessionId(): string {
     try {
-      return window.localStorage.getItem(WorkflowController.guidedSessionKey) || "";
+      return (
+        window.localStorage.getItem(WorkflowController.guidedSessionKey) || ""
+      );
     } catch {
       return "";
     }
@@ -810,7 +911,11 @@ export class WorkflowController {
 
   private rememberGuidedSession(sessionId = ""): void {
     try {
-      if (sessionId) window.localStorage.setItem(WorkflowController.guidedSessionKey, sessionId);
+      if (sessionId)
+        window.localStorage.setItem(
+          WorkflowController.guidedSessionKey,
+          sessionId,
+        );
       else window.localStorage.removeItem(WorkflowController.guidedSessionKey);
     } catch {
       // Storage is optional; the active dialog still owns the session.
@@ -821,25 +926,30 @@ export class WorkflowController {
     if (this.current?.kind !== "catalog") return;
     const status = String(session.status || "");
     const pauseReason = String(session.pause_reason || "");
-    const mode = status === "completed"
-      ? "guided-no-match"
-      : status === "cancelled"
-        ? "guided-setup"
-        : pauseReason === "worked"
-          ? "guided-confirm"
-          : "guided";
-    if (status === "completed" || status === "cancelled") this.rememberGuidedSession();
+    const mode =
+      status === "completed"
+        ? "guided-no-match"
+        : status === "cancelled"
+          ? "guided-setup"
+          : pauseReason === "worked"
+            ? "guided-confirm"
+            : "guided";
+    if (status === "completed" || status === "cancelled")
+      this.rememberGuidedSession();
     else this.rememberGuidedSession(String(session.session_id || ""));
     const delay = Math.max(0, Number(session.remaining_delay_seconds || 0));
     window.clearTimeout(this.guidedCooldownTimer);
     if (delay > 0) {
-      this.guidedCooldownTimer = window.setTimeout(() => {
-        if (this.current?.kind !== "catalog") return;
-        this.setDialog({
-          ...this.current,
-          data: { ...this.current.data, guided_cooldown: 0 },
-        });
-      }, Math.ceil(delay * 1000));
+      this.guidedCooldownTimer = window.setTimeout(
+        () => {
+          if (this.current?.kind !== "catalog") return;
+          this.setDialog({
+            ...this.current,
+            data: { ...this.current.data, guided_cooldown: 0 },
+          });
+        },
+        Math.ceil(delay * 1000),
+      );
     }
     this.setDialog({
       ...this.current,
@@ -855,12 +965,14 @@ export class WorkflowController {
   private async resumeGuidedSession(): Promise<void> {
     const sessionId = this.guidedSessionId();
     if (!sessionId || this.current?.kind !== "catalog") return;
+    const openingDialog = this.current;
     try {
       const result = await this.host.call("catalog_guided_control", {
         session_id: sessionId,
         session_action: "status",
       });
-      if (this.current?.kind === "catalog") this.applyGuidedSession((result?.session || result) as Dict);
+      if (this.current === openingDialog)
+        this.applyGuidedSession((result?.session || result) as Dict);
     } catch {
       this.rememberGuidedSession();
     }
@@ -872,11 +984,16 @@ export class WorkflowController {
     const category = String(dialog.data.category || "").trim();
     const brand = String(dialog.data.brand || "").trim();
     if (!category || !brand) {
-      this.host.setError("Choose a category and enter a brand to start guided matching.");
+      this.host.setError(
+        "Choose a category and enter a brand to start guided matching.",
+      );
       return;
     }
     await this.host.run(async () => {
-      const result = await this.host.call("catalog_guided_start", { category, brand });
+      const result = await this.host.call("catalog_guided_start", {
+        category,
+        brand,
+      });
       this.applyGuidedSession((result?.session || result) as Dict);
     });
   }
@@ -886,7 +1003,9 @@ export class WorkflowController {
     if (!dialog || dialog.kind !== "catalog") return;
     const session = dialog.data.guided_session as Dict | undefined;
     const candidate = session?.current_candidate as Dict | undefined;
-    const emitterRef = String(dialog.data.infrared_emitter_ref || this.host.testEmitterRef() || "");
+    const emitterRef = String(
+      dialog.data.infrared_emitter_ref || this.host.testEmitterRef() || "",
+    );
     if (!emitterRef) {
       this.host.setError("Choose an IR emitter for the one-shot test.");
       return;
@@ -901,7 +1020,9 @@ export class WorkflowController {
     }, "Test command sent once.");
   }
 
-  private async answerGuidedCatalog(resultValue: "worked" | "no_response" | "not_sure"): Promise<void> {
+  private async answerGuidedCatalog(
+    resultValue: "worked" | "no_response" | "not_sure",
+  ): Promise<void> {
     const dialog = this.current;
     if (!dialog || dialog.kind !== "catalog") return;
     const session = dialog.data.guided_session as Dict | undefined;
@@ -916,7 +1037,9 @@ export class WorkflowController {
     });
   }
 
-  private async controlGuidedCatalog(command: "resume" | "cancel"): Promise<void> {
+  private async controlGuidedCatalog(
+    command: "resume" | "cancel",
+  ): Promise<void> {
     const dialog = this.current;
     if (!dialog || dialog.kind !== "catalog") return;
     const session = dialog.data.guided_session as Dict | undefined;
@@ -938,8 +1061,21 @@ export class WorkflowController {
       this.host.setError("Choose an IR receiver before identifying a remote.");
       return;
     }
+    const previousCaptures = Array.isArray(dialog.data.identify_captures)
+      ? (dialog.data.identify_captures as Dict[])
+      : [];
+    const expectedRole = String(dialog.data.identify_role || "");
     const sequence = ++this.learnSequence;
-    this.setDialog({ ...dialog, data: { ...dialog.data, mode: "identify", identifying: true, identify_results: [] } });
+    this.host.setError("");
+    this.setDialog({
+      ...dialog,
+      data: {
+        ...dialog.data,
+        mode: "identify",
+        identifying: true,
+        identify_stage: "listening",
+      },
+    });
     this.host.setBusy(true);
     try {
       this.setCapturing(receiver);
@@ -948,37 +1084,125 @@ export class WorkflowController {
         timeout: this.host.captureTimeout(),
       });
       this.setCapturing("");
-      if (sequence !== this.learnSequence || this.current?.kind !== "catalog") return;
-      const result = await this.host.call("catalog_match_signal", {
-        code: captured.code,
-        format: captured.format || "raw_signed",
-        ...(captured.signal?.carrier_frequency
-          ? { carrier_frequency: captured.signal.carrier_frequency }
-          : {}),
+      if (sequence !== this.learnSequence || this.current?.kind !== "catalog")
+        return;
+      if (!captured.code) throw new Error("No IR code was received");
+      this.setDialog({
+        ...this.current,
+        data: {
+          ...this.current.data,
+          identify_stage: "matching",
+        },
+      });
+      const nextCaptures = [
+        ...previousCaptures,
+        {
+          code: captured.code,
+          format: captured.format || "raw_signed",
+          role: expectedRole,
+          ...(captured.signal?.carrier_frequency
+            ? { carrier_frequency: captured.signal.carrier_frequency }
+            : {}),
+        },
+      ];
+      const result = await this.host.call("catalog_identify_signals", {
+        captures: nextCaptures,
+        appliance_type: String(
+          dialog.data.identify_appliance_type || "generic",
+        ),
         limit: 25,
       });
-      if (sequence !== this.learnSequence || this.current?.kind !== "catalog") return;
+      if (sequence !== this.learnSequence || this.current?.kind !== "catalog")
+        return;
+      const snapshot = {
+        captures: nextCaptures,
+        capture_summaries: result.captures || [],
+        results: result.matches || [],
+        match_count: Number(result.match_count || 0),
+        truncated: Boolean(result.truncated),
+      };
+      const snapshots = Array.isArray(this.current.data.identify_snapshots)
+        ? (this.current.data.identify_snapshots as Dict[])
+        : [];
       this.setDialog({
         ...this.current,
         data: {
           ...this.current.data,
           mode: "identify",
           identifying: false,
-          identify_results: result.matches || [],
+          identify_stage: "idle",
+          identify_role: "",
+          identify_captures: nextCaptures,
+          identify_capture_summaries: snapshot.capture_summaries,
+          identify_results: snapshot.results,
+          identify_match_count: snapshot.match_count,
+          identify_truncated: snapshot.truncated,
+          identify_snapshots: [...snapshots, snapshot],
           identified: true,
         },
       });
     } catch (error) {
-      if (sequence === this.learnSequence) this.host.setError(errorMessage(error));
+      if (sequence === this.learnSequence)
+        this.host.setError(errorMessage(error));
     } finally {
       if (sequence === this.learnSequence) {
         this.setCapturing("");
         this.host.setBusy(false);
         if (this.current?.kind === "catalog") {
-          this.setDialog({ ...this.current, data: { ...this.current.data, identifying: false } });
+          this.setDialog({
+            ...this.current,
+            data: {
+              ...this.current.data,
+              identifying: false,
+              identify_stage: "idle",
+            },
+          });
         }
       }
     }
+  }
+
+  private removeLastCatalogIdentification(): void {
+    const dialog = this.current;
+    if (!dialog || dialog.kind !== "catalog") return;
+    const snapshots = Array.isArray(dialog.data.identify_snapshots)
+      ? (dialog.data.identify_snapshots as Dict[])
+      : [];
+    const remaining = snapshots.slice(0, -1);
+    const previous = remaining.at(-1);
+    this.setDialog({
+      ...dialog,
+      data: {
+        ...dialog.data,
+        identify_captures: (previous?.captures as Dict[]) || [],
+        identify_capture_summaries:
+          (previous?.capture_summaries as Dict[]) || [],
+        identify_results: (previous?.results as Dict[]) || [],
+        identify_match_count: Number(previous?.match_count || 0),
+        identify_truncated: Boolean(previous?.truncated),
+        identify_snapshots: remaining,
+        identified: Boolean(previous),
+      },
+    });
+  }
+
+  private resetCatalogIdentification(): void {
+    const dialog = this.current;
+    if (!dialog || dialog.kind !== "catalog") return;
+    this.setDialog({
+      ...dialog,
+      data: {
+        ...dialog.data,
+        identify_role: "",
+        identify_captures: [],
+        identify_capture_summaries: [],
+        identify_results: [],
+        identify_match_count: 0,
+        identify_truncated: false,
+        identify_snapshots: [],
+        identified: false,
+      },
+    });
   }
 
   private async cancelCatalogCapture(): Promise<void> {
@@ -987,15 +1211,129 @@ export class WorkflowController {
     this.host.setBusy(false);
     this.setCapturing("");
     if (this.current?.kind === "catalog") {
-      this.setDialog({ ...this.current, data: { ...this.current.data, identifying: false } });
+      this.setDialog({
+        ...this.current,
+        data: {
+          ...this.current.data,
+          identifying: false,
+          identify_stage: "idle",
+        },
+      });
     }
-    if (receiver) await this.host.call("cancel_capture", { infrared_receiver_ref: receiver });
+    if (receiver)
+      await this.host.call("cancel_capture", {
+        infrared_receiver_ref: receiver,
+      });
   }
 
-  private async importCatalogProfile(summary: Dict): Promise<void> {
+  private async previewCatalogProfile(summary: Dict): Promise<void> {
+    const dialog = this.current;
+    if (!dialog || dialog.kind !== "catalog") return;
+    const returnMode = String(dialog.data.mode || "search");
+    await this.host.run(async () => {
+      const profile = await this.host.call("catalog_profile", {
+        catalog_profile_id: summary.profile_id,
+      });
+      if (this.current?.kind !== "catalog") return;
+      const plan = (profile.import_plan || {}) as Dict;
+      const allIds = new Set(
+        ((plan.all_command_ids || []) as unknown[]).map(String),
+      );
+      const starterIds = ((plan.starter_command_ids || []) as unknown[])
+        .map(String)
+        .filter((commandId) => allIds.has(commandId));
+      this.setDialog({
+        ...this.current,
+        data: {
+          ...this.current.data,
+          mode: "profile",
+          preview_return_mode: returnMode,
+          selected_profile: profile,
+          selected_command_ids: starterIds,
+        },
+      });
+    });
+  }
+
+  private closeCatalogProfilePreview(): void {
+    const dialog = this.current;
+    if (!dialog || dialog.kind !== "catalog") return;
+    this.setDialog({
+      ...dialog,
+      data: {
+        ...dialog.data,
+        mode: String(dialog.data.preview_return_mode || "search"),
+        selected_profile: null,
+        selected_command_ids: [],
+      },
+    });
+  }
+
+  private changeCatalogSelection(commandId: string, selected: boolean): void {
+    const dialog = this.current;
+    if (!dialog || dialog.kind !== "catalog" || dialog.data.mode !== "profile")
+      return;
+    const selectedIds = new Set(
+      ((dialog.data.selected_command_ids || []) as unknown[]).map(String),
+    );
+    if (selected) selectedIds.add(commandId);
+    else selectedIds.delete(commandId);
+    this.setDialog({
+      ...dialog,
+      data: { ...dialog.data, selected_command_ids: [...selectedIds] },
+    });
+  }
+
+  private async testCatalogCommand(command: Dict): Promise<void> {
+    const dialog = this.current;
+    if (!dialog || dialog.kind !== "catalog" || dialog.data.mode !== "profile")
+      return;
+    const emitterRef = String(dialog.data.infrared_emitter_ref || "");
+    if (!emitterRef) {
+      this.host.setError("Choose an IR emitter for the one-shot test.");
+      return;
+    }
+    if (!command.code) {
+      this.host.setError(
+        "This catalog command has no compatible signal to test.",
+      );
+      return;
+    }
+    await this.host.run(
+      async () => {
+        const signal = (command.signal || {}) as Dict;
+        await this.host.call("send_signal", {
+          infrared_emitter_ref: emitterRef,
+          code: command.code,
+          format: command.format || "raw_signed",
+          ...(signal.carrier_frequency
+            ? { carrier_frequency: signal.carrier_frequency }
+            : {}),
+        });
+      },
+      `Sent ${String(command.name || command.command_id || "command")} once.`,
+    );
+  }
+
+  private async importCatalogProfile(
+    profile: Dict,
+    commandIds: string[],
+    mode: "starter" | "selected" | "all",
+  ): Promise<void> {
+    const allowedIds = new Set(commandIds.map(String));
+    const commands = ((profile.commands || []) as Dict[]).filter(
+      (command) =>
+        allowedIds.has(String(command.command_id || "")) &&
+        Boolean(command.code) &&
+        command.compatible !== false,
+    );
+    if (!commands.length) {
+      this.host.setError("Choose at least one compatible command to import.");
+      return;
+    }
     const registry = this.host.registry();
     const base = slugify(
-      String(summary.name || summary.model || "remote_profile"),
+      String(profile.name || profile.model || "remote_profile"),
     );
     let profileId = base || "remote_profile";
     let suffix = 2;
@@ -1003,16 +1341,12 @@ export class WorkflowController {
       profileId = `${base}_${suffix++}`;
     }
     await this.host.run(async () => {
-      const profile = await this.host.call("catalog_profile", {
-        catalog_profile_id: summary.profile_id,
-      });
       await this.host.call("create_remote_profile", {
         remote_profile_id: profileId,
-        name: profile.name || summary.name || profileId,
+        name: profile.name || profileId,
         appliance_type: profile.category || "generic",
       });
-      for (const command of profile.commands || []) {
-        if (!command.code || command.compatible === false) continue;
+      for (const command of commands) {
         await this.host.call("store_command", {
           remote_profile_id: profileId,
           command_id: command.command_id,
@@ -1020,7 +1354,12 @@ export class WorkflowController {
           code: command.code,
           format: command.format || "raw_signed",
           role: command.role || "",
-          source: command.source || { type: "catalog" },
+          source: {
+            ...((command.source || { type: "catalog" }) as Dict),
+            ...((((command.import || {}) as Dict).provenance || {}) as Dict),
+            profile_id: profile.profile_id,
+            import_mode: mode,
+          },
         });
       }
       await this.host.reload();
@@ -1029,7 +1368,8 @@ export class WorkflowController {
         title: "Remote profile imported",
         data: {
           remote_profile_id: profileId,
-          remote_profile_name: profile.name || summary.name || profileId,
+          remote_profile_name: profile.name || profileId,
+          imported_command_count: commands.length,
           appliance_id: "",
         },
       });
@@ -1073,10 +1413,6 @@ export class WorkflowController {
       await this.submitAppliance(data);
       return;
     }
-    if (kind === "custom-signal") {
-      await this.submitCustomSignal(data);
-      return;
-    }
     if (kind === "command-edit") {
       await this.submitCommandEdit(data);
       return;
@@ -1100,56 +1436,62 @@ export class WorkflowController {
     data: Dict,
     confirmAction?: string,
   ): Promise<void> {
-    await this.host.run(async () => {
-      if (confirmAction === "remove-profile") {
-        await this.host.call("remove_remote_profile", {
-          remote_profile_id: data.remote_profile_id,
-          confirm: true,
-        });
-      } else if (confirmAction === "remove-appliance") {
-        await this.host.call("remove_appliance", {
-          appliance_id: data.appliance_id,
-          confirm: true,
-        });
-      } else if (confirmAction === "remove-command") {
-        await this.host.call("remove_command", {
-          remote_profile_id: data.remote_profile_id,
-          command_id: data.command_id,
-        });
-        this.host.clearInspector();
-      } else if (confirmAction === "restore-revision") {
-        await this.host.call("restore_revision", {
-          remote_profile_id: data.remote_profile_id,
-          command_id: data.command_id,
-          revision_id: data.revision_id,
-        });
-      }
-      this.setDialog(null);
-      await this.host.reload();
-      if (confirmAction === "restore-revision") {
-        await this.host.openCommand(
-          String(data.remote_profile_id),
-          String(data.command_id),
-        );
-        this.host.showInspectorHistory();
-      }
-    }, confirmAction === "restore-revision" ? "Revision restored." : "Removed.");
+    await this.host.run(
+      async () => {
+        if (confirmAction === "remove-profile") {
+          await this.host.call("remove_remote_profile", {
+            remote_profile_id: data.remote_profile_id,
+            confirm: true,
+          });
+        } else if (confirmAction === "remove-appliance") {
+          await this.host.call("remove_appliance", {
+            appliance_id: data.appliance_id,
+            confirm: true,
+          });
+        } else if (confirmAction === "remove-command") {
+          await this.host.call("remove_command", {
+            remote_profile_id: data.remote_profile_id,
+            command_id: data.command_id,
+          });
+          this.host.clearInspector();
+        } else if (confirmAction === "restore-revision") {
+          await this.host.call("restore_revision", {
+            remote_profile_id: data.remote_profile_id,
+            command_id: data.command_id,
+            revision_id: data.revision_id,
+          });
+        }
+        this.setDialog(null);
+        await this.host.reload();
+        if (confirmAction === "restore-revision") {
+          await this.host.openCommand(
+            String(data.remote_profile_id),
+            String(data.command_id),
+          );
+          this.host.showInspectorHistory();
+        }
+      },
+      confirmAction === "restore-revision" ? "Revision restored." : "Removed.",
+    );
   }
 
   private async submitProfile(data: Dict): Promise<void> {
-    await this.host.run(async () => {
-      const action = data.editing
-        ? "update_remote_profile"
-        : "create_remote_profile";
-      await this.host.call(action, {
-        remote_profile_id: String(data.remote_profile_id),
-        name: String(data.name).trim(),
-        appliance_type: String(data.appliance_type || "generic"),
-      });
-      this.setDialog(null);
-      this.host.clearInspector();
-      await this.host.reload();
-    }, data.editing ? "Remote profile updated." : "Remote profile created.");
+    await this.host.run(
+      async () => {
+        const action = data.editing
+          ? "update_remote_profile"
+          : "create_remote_profile";
+        await this.host.call(action, {
+          remote_profile_id: String(data.remote_profile_id),
+          name: String(data.name).trim(),
+          appliance_type: String(data.appliance_type || "generic"),
+        });
+        this.setDialog(null);
+        this.host.clearInspector();
+        await this.host.reload();
+      },
+      data.editing ? "Remote profile updated." : "Remote profile created.",
+    );
   }
 
   private async submitDuplicateProfile(data: Dict): Promise<void> {
@@ -1171,35 +1513,22 @@ export class WorkflowController {
       this.host.setError("Choose an IR emitter for this appliance.");
       return;
     }
-    await this.host.run(async () => {
-      const action = data.editing ? "update_appliance" : "create_appliance";
-      await this.host.call(action, {
-        appliance_id: String(data.appliance_id),
-        name: String(data.name).trim(),
-        remote_profile_id: String(data.remote_profile_id || ""),
-        infrared_emitter_ref: String(data.infrared_emitter_ref || ""),
-        area_id: String(data.area_id || ""),
-        preferred_platform: String(data.preferred_platform || "auto"),
-      });
-      this.setDialog(null);
-      await this.host.reload();
-    }, data.editing ? "Appliance updated." : "Appliance created.");
-  }
-
-  private async submitCustomSignal(data: Dict): Promise<void> {
-    await this.host.run(async () => {
-      await this.host.call("store_command", {
-        remote_profile_id: data.remote_profile_id,
-        command_id: data.command_id,
-        name: String(data.name).trim(),
-        code: String(data.code).trim(),
-        format: data.format,
-        role: data.role || "",
-        source: { type: "signal_lab" },
-      });
-      this.setDialog(null);
-      await this.host.reload();
-    }, "Custom signal saved.");
+    await this.host.run(
+      async () => {
+        const action = data.editing ? "update_appliance" : "create_appliance";
+        await this.host.call(action, {
+          appliance_id: String(data.appliance_id),
+          name: String(data.name).trim(),
+          remote_profile_id: String(data.remote_profile_id || ""),
+          infrared_emitter_ref: String(data.infrared_emitter_ref || ""),
+          area_id: String(data.area_id || ""),
+          preferred_platform: String(data.preferred_platform || "auto"),
+        });
+        this.setDialog(null);
+        await this.host.reload();
+      },
+      data.editing ? "Appliance updated." : "Appliance created.",
+    );
   }
 
   private async submitCommandEdit(data: Dict): Promise<void> {
@@ -1264,19 +1593,22 @@ export class WorkflowController {
       ? data.command_ids.map(String)
       : [];
     if (!sourceId || !targetId || !commandIds.length) return;
-    await this.host.run(async () => {
-      for (const commandId of commandIds) {
-        await this.host.call("move_command", {
-          remote_profile_id: sourceId,
-          command_id: commandId,
-          target_remote_profile_id: targetId,
-        });
-      }
-      this.setDialog(null);
-      this.host.clearInspector();
-      this.host.clearCommandSelection();
-      await this.host.reload();
-    }, `Moved ${commandIds.length} command${commandIds.length === 1 ? "" : "s"}.`);
+    await this.host.run(
+      async () => {
+        for (const commandId of commandIds) {
+          await this.host.call("move_command", {
+            remote_profile_id: sourceId,
+            command_id: commandId,
+            target_remote_profile_id: targetId,
+          });
+        }
+        this.setDialog(null);
+        this.host.clearInspector();
+        this.host.clearCommandSelection();
+        await this.host.reload();
+      },
+      `Moved ${commandIds.length} command${commandIds.length === 1 ? "" : "s"}.`,
+    );
   }
 
   private async captureLearn(): Promise<void> {
@@ -1297,6 +1629,12 @@ export class WorkflowController {
         capture_error: "",
         preview: null,
         optimized: false,
+        original_preview: null,
+        original_capture_saved: false,
+        analysis_error: "",
+        duplicate_match: null,
+        catalog_matches: [],
+        catalog_match_review: null,
       },
     });
     this.host.setBusy(true);
@@ -1310,17 +1648,47 @@ export class WorkflowController {
       if (sequence !== this.learnSequence || this.current?.kind !== "learn") {
         return;
       }
+      if (!captured.code) throw new Error("No IR code was received");
       this.setDialog({
         ...this.current,
         data: { ...this.current.data, stage: "preparing" },
       });
-      const analyzed = await this.host.call("analyze_signal", {
+      const format = captured.format || "raw_signed";
+      const carrierFrequency = captured.signal?.carrier_frequency;
+      let analyzed: Dict | null = null;
+      let analysisError = "";
+      try {
+        analyzed = await this.host.call("analyze_signal", {
+          code: captured.code,
+          format,
+          ...(carrierFrequency ? { carrier_frequency: carrierFrequency } : {}),
+        });
+      } catch (error) {
+        analysisError = errorMessage(error);
+      }
+      if (sequence !== this.learnSequence || this.current?.kind !== "learn") {
+        return;
+      }
+      const preview: Dict = {
         code: captured.code,
-        format: captured.format || "raw_signed",
-        ...(captured.signal?.carrier_frequency
-          ? { carrier_frequency: captured.signal.carrier_frequency }
-          : {}),
-      });
+        format,
+        signal: analyzed?.signal || captured.signal || {},
+        analysis: analyzed?.analysis || {},
+      };
+      let catalogMatches: Dict[] = [];
+      try {
+        const matched = await this.host.call("catalog_match_signal", {
+          code: captured.code,
+          format,
+          ...(carrierFrequency ? { carrier_frequency: carrierFrequency } : {}),
+          limit: 12,
+        });
+        catalogMatches = Array.isArray(matched.matches)
+          ? (matched.matches as Dict[])
+          : [];
+      } catch {
+        // The offline catalog is optional; a capture remains useful without it.
+      }
       if (sequence !== this.learnSequence || this.current?.kind !== "learn") {
         return;
       }
@@ -1329,12 +1697,10 @@ export class WorkflowController {
         data: {
           ...this.current.data,
           stage: "review",
-          preview: {
-            code: captured.code,
-            format: captured.format || "raw_signed",
-            signal: analyzed.signal || captured.signal || {},
-            analysis: analyzed.analysis || {},
-          },
+          preview,
+          analysis_error: analysisError,
+          catalog_matches: catalogMatches,
+          duplicate_match: this.findLearnDuplicate(preview, this.current.data),
         },
       });
     } catch (error) {
@@ -1359,7 +1725,93 @@ export class WorkflowController {
   private learnPreview(): Dict | null {
     if (this.current?.kind !== "learn") return null;
     const preview = this.current.data.preview;
-    return preview && typeof preview === "object" ? preview as Dict : null;
+    return preview && typeof preview === "object" ? (preview as Dict) : null;
+  }
+
+  private findLearnDuplicate(preview: Dict, learn: Dict): Dict | null {
+    const analysis = (preview.analysis || {}) as Dict;
+    const fingerprints = (analysis.fingerprints || {}) as Dict;
+    const normalized = String(fingerprints.normalized_50us || "");
+    const exact = String(fingerprints.exact || "");
+    if (!normalized && !exact) return null;
+    for (const [profileId, profile] of Object.entries(
+      this.host.registry().remote_profiles || {},
+    )) {
+      for (const [commandId, command] of Object.entries(
+        profile.commands || {},
+      )) {
+        if (
+          profileId === String(learn.remote_profile_id || "") &&
+          commandId === String(learn.command_id || "")
+        )
+          continue;
+        const saved = (command.analysis?.fingerprints || {}) as Dict;
+        const matchBasis =
+          normalized && normalized === saved.normalized_50us
+            ? "normalized_50us"
+            : exact && exact === saved.exact
+              ? "exact"
+              : "";
+        if (!matchBasis) continue;
+        return {
+          remote_profile_id: profileId,
+          remote_profile_name: profile.name || profileId,
+          command_id: commandId,
+          command_name: command.name || commandId,
+          match_basis: matchBasis,
+        };
+      }
+    }
+    return null;
+  }
+
+  private async openLearnDuplicate(match: Dict): Promise<void> {
+    const profileId = String(match.remote_profile_id || "");
+    const commandId = String(match.command_id || "");
+    if (!profileId || !commandId) return;
+    this.learnSequence += 1;
+    this.setDialog(null);
+    await this.host.openCommand(profileId, commandId);
+  }
+
+  private replaceLearnDuplicate(match: Dict): void {
+    const dialog = this.current;
+    if (!dialog || dialog.kind !== "learn") return;
+    const profileId = String(match.remote_profile_id || "");
+    const commandId = String(match.command_id || "");
+    const command =
+      this.host.registry().remote_profiles?.[profileId]?.commands?.[commandId];
+    if (!profileId || !commandId || !command) return;
+    this.setDialog({
+      ...dialog,
+      data: {
+        ...dialog.data,
+        remote_profile_id: profileId,
+        command_id: commandId,
+        name: command.name || match.command_name || commandId,
+        role: command.role || "",
+        relearn: true,
+        idTouched: true,
+        duplicate_match: null,
+        duplicate_replacement: true,
+      },
+    });
+  }
+
+  private async reviewLearnCatalogMatch(match: Dict): Promise<void> {
+    const profile = (match.profile || {}) as Dict;
+    const profileId = String(profile.profile_id || match.profile_id || "");
+    if (!profileId || this.current?.kind !== "learn") return;
+    await this.host.run(async () => {
+      const review = await this.host.call("catalog_profile", {
+        catalog_profile_id: profileId,
+      });
+      if (this.current?.kind !== "learn") return;
+      this.setDialog({
+        ...this.current,
+        data: { ...this.current.data, catalog_match_review: review },
+      });
+    });
   }
 
   private async testLearnCapture(): Promise<void> {
@@ -1367,7 +1819,9 @@ export class WorkflowController {
     if (!preview) return;
     const emitterRef = this.host.testEmitterRef();
     if (!emitterRef) {
-      this.host.setError("Choose a temporary IR emitter before testing this capture.");
+      this.host.setError(
+        "Choose a temporary IR emitter before testing this capture.",
+      );
       return;
     }
     const signal = (preview.signal || {}) as Dict;
@@ -1410,6 +1864,8 @@ export class WorkflowController {
         data: {
           ...this.current.data,
           optimized: true,
+          original_preview: this.current.data.original_preview || preview,
+          original_capture_saved: false,
           preview: {
             code: encoded.code,
             format: "raw_signed",
@@ -1430,33 +1886,70 @@ export class WorkflowController {
     const commandId = String(data.command_id || "");
     const name = String(data.name || "").trim();
     if (!profileId || !commandId || !name) return;
-    const existing = this.host.registry().remote_profiles?.[profileId]
-      ?.commands?.[commandId];
-    if (existing && !data.relearn) {
+    const existing =
+      this.host.registry().remote_profiles?.[profileId]?.commands?.[commandId];
+    if (existing && !data.relearn && !data.original_capture_saved) {
       this.host.setError(
         "That command ID already exists in this remote profile. Choose another ID.",
       );
       return;
     }
     const signal = (preview.signal || {}) as Dict;
+    const originalPreview =
+      data.original_preview && typeof data.original_preview === "object"
+        ? (data.original_preview as Dict)
+        : null;
     let saved = false;
-    await this.host.run(async () => {
-      await this.host.call("store_command", {
-        remote_profile_id: profileId,
-        command_id: commandId,
-        name,
-        code: preview.code,
-        format: preview.format || "raw_signed",
-        role: data.role || "",
-        source: {
-          type: "learn",
-          infrared_receiver_ref: data.infrared_receiver_ref,
-          carrier_frequency: signal.carrier_frequency,
-        },
-      });
-      await this.host.reload();
-      saved = true;
-    }, another ? "Command saved. Listening for another." : "Command learned and saved.");
+    await this.host.run(
+      async () => {
+        if (data.optimized && originalPreview && !data.original_capture_saved) {
+          const originalSignal = (originalPreview.signal || {}) as Dict;
+          await this.host.call("store_command", {
+            remote_profile_id: profileId,
+            command_id: commandId,
+            name,
+            code: originalPreview.code,
+            format: originalPreview.format || "raw_signed",
+            role: data.role || "",
+            source: {
+              type: "captured_signal",
+              infrared_receiver_ref: data.infrared_receiver_ref,
+              carrier_frequency: originalSignal.carrier_frequency,
+              carrier_source: originalSignal.carrier_source,
+              retained_before_single_press_optimization: true,
+            },
+          });
+          if (this.current?.kind === "learn") {
+            this.setDialog({
+              ...this.current,
+              data: { ...this.current.data, original_capture_saved: true },
+            });
+          }
+        }
+        await this.host.call("store_command", {
+          remote_profile_id: profileId,
+          command_id: commandId,
+          name,
+          code: preview.code,
+          format: preview.format || "raw_signed",
+          role: data.role || "",
+          source: {
+            type: data.optimized ? "single_press_optimization" : "learn",
+            infrared_receiver_ref: data.infrared_receiver_ref,
+            carrier_frequency: signal.carrier_frequency,
+            carrier_source: signal.carrier_source,
+            ...(data.optimized
+              ? { original_capture_retained_as_prior_revision: true }
+              : {}),
+          },
+        });
+        await this.host.reload();
+        saved = true;
+      },
+      another
+        ? "Command saved. Listening for another."
+        : "Command learned and saved.",
+    );
     if (!saved) return;
     if (another) this.openLearn(profileId);
     else this.setDialog(null);

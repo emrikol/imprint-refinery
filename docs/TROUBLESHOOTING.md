@@ -110,7 +110,7 @@ Check:
 The card logs its loaded version in the browser console:
 
 ```text
-IMPRINT REFINERY 0.2.0
+IMPRINT REFINERY 0.3.0
 ```
 
 If the console shows an older version after updating, restart Home Assistant

@@ -18,8 +18,6 @@ const views = process.argv.slice(2).length
       "learn-error",
       "no-receiver-dialog",
       "profile-dialog",
-      "custom-signal-dialog",
-      "custom-signal-fallback",
       "catalog-dialog",
       "confirmation-dialog",
       "icon-dialog",

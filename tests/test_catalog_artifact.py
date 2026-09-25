@@ -107,6 +107,14 @@ class CatalogArtifactTests(unittest.TestCase):
         self.assertEqual(result["matches"][0]["match_basis"]["type"], "normalized_50us")
         self.assertIsNotNone(catalog._matches)
 
+        complete = catalog.match(
+            normalized_50us="a" * 64,
+            parsed=[("NEC", 0x10, 0x20)],
+            limit=None,
+        )
+        self.assertEqual(len(complete["matches"]), 2)
+        self.assertFalse(complete["truncated"])
+
 
 if __name__ == "__main__":
     unittest.main()

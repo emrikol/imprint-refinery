@@ -1,7 +1,7 @@
 {
   "name": "imprint-refinery-frontend",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "GPL-2.0-or-later",
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
     "dev": "node esbuild.config.mjs --watch",
     "smoke:browser": "node tools/browser_smoke.mjs",
     "render:fixtures": "node tools/render_frontend.mjs",
-    "test:frontend-unit": "node tools/frontend_unit_smoke.mjs",
+    "test:frontend-unit": "node tools/frontend_unit_smoke.mjs && node tools/workflow_controller_smoke.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

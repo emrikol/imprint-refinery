@@ -1,6 +1,6 @@
 """Offline catalog backed by the bundled Flipper-IRDB artifact."""
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from functools import lru_cache
 import re
@@ -16,26 +16,64 @@ from .ir_formats import (
     encode_raw,
     signal_document,
 )
+from .product_spec import SIGNAL_ROLES
 
 
 class CatalogUnavailableError(RuntimeError):
     """Raised when the bundled offline catalog is unavailable."""
 
 
-_FEATURES = {
-    "POWER": "power_toggle",
-    "POWER_ON": "power_on",
-    "POWER_OFF": "power_off",
-    "VOLUME_UP": "volume_up",
-    "VOLUME_DOWN": "volume_down",
-    "MUTE": "mute_toggle",
-    "MUTE_ON": "mute",
-    "MUTE_OFF": "unmute",
-    "PLAY": "play",
-    "PAUSE": "pause",
-    "STOP": "stop",
-    "FAST_FORWARD": "fast_forward",
-    "REWIND": "rewind",
+_COMMAND_ROLE_ALIASES = {
+    "power": "power_toggle",
+    "power_toggle": "power_toggle",
+    "on_off": "power_toggle",
+    "power_on": "power_on",
+    "led_on": "power_on",
+    "on": "power_on",
+    "power_off": "power_off",
+    "led_off": "power_off",
+    "off": "power_off",
+    "standby": "power_toggle",
+    "play_pause": "play_pause_toggle",
+    "pause_play": "play_pause_toggle",
+    "play_pause_toggle": "play_pause_toggle",
+    "play": "play",
+    "pause": "pause",
+    "stop": "stop",
+    "previous": "previous",
+    "prev": "previous",
+    "skip_back": "previous",
+    "skip_backward": "previous",
+    "next": "next",
+    "skip_forward": "next",
+    "skip_fwd": "next",
+    "rewind": "rewind",
+    "rew": "rewind",
+    "rev": "rewind",
+    "reverse": "rewind",
+    "fast_back": "rewind",
+    "fast_backward": "rewind",
+    "fast_ba": "rewind",
+    "fast_forward": "fast_forward",
+    "forward": "fast_forward",
+    "fwd": "fast_forward",
+    "ff": "fast_forward",
+    "fast_fo": "fast_forward",
+    "volume_down": "volume_down",
+    "vol_down": "volume_down",
+    "vol_dn": "volume_down",
+    "vol_dwn": "volume_down",
+    "volume_up": "volume_up",
+    "vol_up": "volume_up",
+    "mute": "mute_toggle",
+    "muting": "mute_toggle",
+    "mute_toggle": "mute_toggle",
+    "mute_on": "mute",
+    "mute_off": "unmute",
+    "unmute": "unmute",
+    "source": "source",
+    "input": "source",
+    "input_select": "source",
 }
 
 _CATEGORY_FAMILIES = {
@@ -58,6 +96,73 @@ _CATEGORY_FAMILIES = {
     },
     "light": {"light"},
 }
+
+_APPLIANCE_TYPE_CATEGORIES = {
+    "air_purifier": {"air_purifier"},
+    "audio": {"audio"},
+    "climate": {"climate"},
+    "display": {"display", "picture_frames", "touchscreen_displays", "whiteboards"},
+    "fan": {"fan"},
+    "fireplace": {"fireplace"},
+    "heater": {"heater"},
+    "humidifier": {"humidifier"},
+    "light": {"light"},
+    "media_player": {"consoles", "laserdisc", "media_player", "minidisc", "multimedia"},
+    "projector": {"projector"},
+    "receiver": {"receiver"},
+    "set_top_box": {"dvb_t", "set_top_box", "tv_tuner"},
+    "tv": {"tv"},
+}
+
+_UNCLASSIFIED_CATALOG_CATEGORIES = {
+    "converted",
+    "csv",
+    "ir_plus",
+    "miscellaneous",
+    "other",
+    "pronto",
+}
+
+
+def canonical_command_role(name: str) -> str:
+    """Return a conservative standard role for one catalog command label."""
+    raw_name = name.strip().casefold()
+    if re.fullmatch(r"vol(?:ume)?[\s._-]*\+", raw_name):
+        return "volume_up"
+    if re.fullmatch(r"vol(?:ume)?[\s._]*-", raw_name):
+        return "volume_down"
+    command_id = normalize_identifier(name)
+    direct = _COMMAND_ROLE_ALIASES.get(command_id)
+    if direct:
+        return direct
+    if re.fullmatch(r"(?:power_|led_)?off_\d+", command_id):
+        return "power_off"
+    if re.fullmatch(r"(?:power_|led_)?on_\d+", command_id):
+        return "power_on"
+    return ""
+
+
+def appliance_type_match(category: str, appliance_type: str) -> str:
+    """Classify catalog metadata without discarding unclassified profiles."""
+    normalized_type = normalize_identifier(appliance_type)
+    if not normalized_type or normalized_type == "generic":
+        return "all"
+    normalized_category = normalize_identifier(category)
+    expected = _APPLIANCE_TYPE_CATEGORIES.get(normalized_type, {normalized_type})
+    if normalized_category in expected:
+        return "selected"
+    if normalized_category in _UNCLASSIFIED_CATALOG_CATEGORIES:
+        return "unclassified"
+    return "other"
+
+
+def _appliance_type_rank(category: str, appliance_type: str) -> int:
+    return {
+        "all": 0,
+        "selected": 0,
+        "unclassified": 1,
+        "other": 2,
+    }[appliance_type_match(category, appliance_type)]
 
 
 @lru_cache(maxsize=1)
@@ -197,7 +302,7 @@ def get_profile(profile_id: str) -> dict[str, Any]:
             {
                 "command_id": command_id,
                 "name": decoded.name,
-                "role": _FEATURES.get(command_id.upper(), ""),
+                "role": canonical_command_role(decoded.name),
                 "code": code,
                 "format": "raw_signed",
                 "signal": signal_document(signal, "provided"),
@@ -443,14 +548,20 @@ def guided_candidates(*, category: str, brand: str) -> dict[str, Any]:
 def match_signal(
     candidate: IRSignal | Mapping[str, Any],
     *,
-    limit: int = 25,
+    limit: int | None = 25,
+    expected_role: str = "",
+    appliance_type: str = "generic",
 ) -> dict[str, Any]:
     """Match exact artifact fingerprints or parsed protocol fields."""
     status = catalog_status()
     if not status["installed"]:
         raise CatalogUnavailableError("bundled offline catalog is not installed")
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+    ):
         raise ValueError("limit must be a positive integer")
+    if expected_role and expected_role not in SIGNAL_ROLES:
+        raise ValueError(f"unsupported command role: {expected_role}")
     analysis = _candidate_analysis(candidate)
     fingerprints = _analysis_fingerprints(analysis)
     parsed = []
@@ -473,7 +584,7 @@ def match_signal(
         result = bundled_catalog().match(
             normalized_50us=fingerprints["normalized_50us"],
             parsed=parsed,
-            limit=limit,
+            limit=None,
         )
     except CatalogArtifactError as err:
         raise CatalogUnavailableError(str(err)) from err
@@ -485,15 +596,18 @@ def match_signal(
         "revision": status.get("revision"),
     }
     matches = []
-    for rank, item in enumerate(result["matches"], start=1):
+    for item in result["matches"]:
         profile = item["profile"]
         basis = item["match_basis"]
         command = item["command"]
         command_name = command["name"]
+        role = canonical_command_role(command_name)
+        if expected_role and role != expected_role:
+            continue
         matches.append(
             {
-                "rank": rank,
                 "match_quality": basis["type"],
+                "match_method": _match_method(basis),
                 "match_basis": basis,
                 "profile": {
                     key: profile[key]
@@ -509,6 +623,7 @@ def match_signal(
                 "command": {
                     "command_id": normalize_identifier(command_name),
                     "name": command_name,
+                    "role": role,
                     "record_index": command["record_index"],
                     "record_type": command["record_type"],
                 },
@@ -518,15 +633,118 @@ def match_signal(
                     else {}
                 ),
                 "source": {**source, "path": profile["source_path"]},
+                "appliance_type_match": appliance_type_match(
+                    profile["category"], appliance_type
+                ),
             }
         )
+    matches.sort(
+        key=lambda match: _appliance_type_rank(
+            match["profile"]["category"], appliance_type
+        )
+    )
+    for rank, match in enumerate(matches, start=1):
+        match["rank"] = rank
+    profile_ids = list(
+        dict.fromkeys(match["profile"]["profile_id"] for match in matches)
+    )
+    visible = matches if limit is None else matches[:limit]
     return {
         "catalog": status,
         "fingerprints": fingerprints,
-        "match_count": result["match_count"],
-        "truncated": result["truncated"],
-        "matches": matches,
+        "match_count": len(matches),
+        "profile_count": len(profile_ids),
+        "profile_ids": profile_ids,
+        "truncated": limit is not None and len(matches) > len(visible),
+        "matches": visible,
     }
+
+
+def identify_signals(
+    captures: Iterable[tuple[IRSignal | Mapping[str, Any], str]],
+    *,
+    limit: int = 25,
+    appliance_type: str = "generic",
+) -> dict[str, Any]:
+    """Intersect complete catalog profile matches across captured buttons."""
+    capture_list = list(captures)
+    if not capture_list:
+        raise ValueError("at least one captured signal is required")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer")
+
+    capture_maps: list[dict[str, dict[str, Any]]] = []
+    capture_summaries: list[dict[str, Any]] = []
+    seen_signatures: dict[tuple[str, str], int] = {}
+    catalog = catalog_status()
+    for index, (candidate, expected_role) in enumerate(capture_list, start=1):
+        result = match_signal(
+            candidate,
+            limit=None,
+            expected_role=expected_role,
+            appliance_type=appliance_type,
+        )
+        by_profile: dict[str, dict[str, Any]] = {}
+        for match in result["matches"]:
+            profile_id = match["profile"]["profile_id"]
+            by_profile.setdefault(profile_id, match)
+        capture_maps.append(by_profile)
+        signature = (result["fingerprints"]["normalized_50us"], expected_role)
+        duplicate_of = seen_signatures.get(signature)
+        seen_signatures.setdefault(signature, index)
+        capture_summaries.append(
+            {
+                "index": index,
+                "role": expected_role,
+                "profile_count": len(by_profile),
+                "duplicate_of": duplicate_of,
+            }
+        )
+
+    common_ids = set(capture_maps[0])
+    for by_profile in capture_maps[1:]:
+        common_ids.intersection_update(by_profile)
+    ordered_ids = [
+        profile_id for profile_id in capture_maps[0] if profile_id in common_ids
+    ]
+
+    matches = []
+    for rank, profile_id in enumerate(ordered_ids, start=1):
+        evidence = [by_profile[profile_id] for by_profile in capture_maps]
+        matches.append(
+            {
+                "rank": rank,
+                "profile": evidence[0]["profile"],
+                "appliance_type_match": evidence[0].get("appliance_type_match", "all"),
+                "matched_capture_count": len(evidence),
+                "evidence": [
+                    {
+                        "capture_index": capture_index,
+                        "command": item["command"],
+                        "match_basis": item["match_basis"],
+                        "match_method": item["match_method"],
+                    }
+                    for capture_index, item in enumerate(evidence, start=1)
+                ],
+            }
+        )
+
+    return {
+        "catalog": catalog,
+        "appliance_type": appliance_type,
+        "captures": capture_summaries,
+        "match_count": len(matches),
+        "truncated": len(matches) > limit,
+        "matches": matches[:limit],
+    }
+
+
+def _match_method(basis: Mapping[str, Any]) -> str:
+    """Describe a catalog match without exposing internal enum names."""
+    if basis.get("type") == "normalized_50us":
+        return "Timing fingerprint match"
+    protocol = str(basis.get("protocol") or "decoded").upper()
+    return f"Decoded {protocol} command match"
 
 
 def _candidate_analysis(

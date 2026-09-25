@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Iterator, Mapping
+import logging
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -16,8 +17,10 @@ from .const import (
     ERROR_ZHA_UNAVAILABLE,
 )
 from .errors import ImprintRefineryError
-from .ir_formats import IRSignal
+from .ir_formats import IRFormatError, IRSignal
 from .zha_drivers import ZhaDriver, detect_zha_driver, get_zha_driver
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def find_zha_device(hass: HomeAssistant, ieee: str) -> dr.DeviceEntry | None:
@@ -293,7 +296,7 @@ class ZhaBridge:
         finally:
             completion.remove_listener(waiter)
 
-    async def read_last_signal(self, emitter: dict[str, Any]) -> IRSignal | None:
+    async def _read_last_payload(self, emitter: dict[str, Any]) -> str | None:
         driver = self.driver(emitter)
         ieee = emitter["ieee"]
         device = find_zha_device(self._hass, ieee)
@@ -321,7 +324,12 @@ class ZhaBridge:
             driver.capture_attribute_id,
             values.get(driver.capture_attribute),
         )
-        return None if value in (None, "") else driver.decode_capture(str(value))
+        return None if value in (None, "") else str(value)
+
+    async def read_last_signal(self, emitter: dict[str, Any]) -> IRSignal | None:
+        """Read and decode the most recently learned vendor payload."""
+        payload = await self._read_last_payload(emitter)
+        return None if payload is None else self.driver(emitter).decode_capture(payload)
 
     async def capture(
         self,
@@ -331,7 +339,7 @@ class ZhaBridge:
         poll_interval: int,
     ) -> IRSignal:
         """Capture one changed signal and always leave learning mode."""
-        previous = await self.read_last_signal(emitter)
+        previous = await self._read_last_payload(emitter)
         await self.start_capture(emitter)
         elapsed = 0.0
         reassert = int(emitter["config"].get("capture_reassert_interval", 8))
@@ -340,9 +348,17 @@ class ZhaBridge:
             while elapsed < timeout:
                 await asyncio.sleep(poll_interval)
                 elapsed += poll_interval
-                signal = await self.read_last_signal(emitter)
-                if signal is not None and signal != previous:
-                    return signal
+                payload = await self._read_last_payload(emitter)
+                if payload is not None and payload != previous:
+                    previous = payload
+                    try:
+                        return self.driver(emitter).decode_capture(payload)
+                    except IRFormatError as error:
+                        _LOGGER.warning(
+                            "Ignoring malformed infrared capture from %s: %s",
+                            emitter["ieee"],
+                            error,
+                        )
                 if elapsed >= next_reassert:
                     await self.start_capture(emitter)
                     next_reassert += reassert

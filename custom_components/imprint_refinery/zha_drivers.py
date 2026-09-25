@@ -11,7 +11,13 @@ from typing import Any
 
 from .const import ERROR_UNKNOWN_DRIVER
 from .errors import ImprintRefineryError
-from .ir_formats import IRSignal, broadlink_encode, zosung_decode, zosung_encode
+from .ir_formats import (
+    IRSignal,
+    broadlink_decode,
+    broadlink_encode,
+    zosung_decode,
+    zosung_encode,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +87,7 @@ DRIVERS: tuple[ZhaDriver, ...] = (
         carrier_frequency=38_000,
         carrier_source="assumed",
         encode=broadlink_encode,
-        decode=zosung_decode,
+        decode=broadlink_decode,
         manufacturers=("HOBEIAN",),
         models=("ZG-IR01",),
         send_completion_on_end_request=True,

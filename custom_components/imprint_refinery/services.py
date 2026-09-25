@@ -23,12 +23,14 @@ from .backup import BackupError, inspect_backup
 from .catalog import (
     CatalogUnavailableError,
     guided_candidates,
+    identify_signals,
     match_signal,
     prepare_profile_import,
     search_profiles,
 )
 from .catalog_sessions import GuidedCatalogSessionManager, GuidedSessionError
 from .const import (
+    CAPTURE_ARMING_GRACE_SECONDS,
     CONF_IEEE,
     DOMAIN,
     EMITTER_SUBENTRY_TYPE,
@@ -71,7 +73,14 @@ from .ir_formats.conversion import (
     conversion_loss_report,
     decode_profile_partial,
 )
-from .product_spec import PLATFORM_PREFERENCES, SIGNAL_ROLES, Actions, Fields, States
+from .product_spec import (
+    APPLIANCE_TYPES,
+    PLATFORM_PREFERENCES,
+    SIGNAL_ROLES,
+    Actions,
+    Fields,
+    States,
+)
 from .signal_command import RawSignalCommand, signal_from_command
 from .storage import SignalLibraryStore
 
@@ -91,6 +100,7 @@ PANEL_ACTIONS = (
     Actions.GUIDED_CONTROL,
     Actions.GUIDED_START,
     Actions.GUIDED_TEST,
+    Actions.IDENTIFY_CATALOG_SIGNALS,
     Actions.MATCH_CATALOG_SIGNAL,
     Actions.ENCODE_SIGNAL,
     Actions.EXPORT_BACKUP,
@@ -387,7 +397,10 @@ class ServiceAPI:
             try:
                 try:
                     captured = await asyncio.wait_for(
-                        result, timeout=call.data[Fields.TIMEOUT]
+                        result,
+                        timeout=(
+                            call.data[Fields.TIMEOUT] + CAPTURE_ARMING_GRACE_SECONDS
+                        ),
                     )
                 except TimeoutError as error:
                     raise ImprintRefineryError(
@@ -542,6 +555,28 @@ class ServiceAPI:
             signal = _decode_service_request(call.data).signal
             return await self.hass.async_add_executor_job(
                 lambda: match_signal(signal, limit=call.data[Fields.LIMIT])
+            )
+        except CatalogUnavailableError as error:
+            raise ImprintRefineryError(ERROR_CATALOG_UNAVAILABLE, str(error)) from error
+        except ValueError as error:
+            raise ImprintRefineryError(ERROR_CODE_INVALID, str(error)) from error
+
+    async def catalog_identify_signals(self, call: ServiceCall) -> dict[str, Any]:
+        """Identify profiles that match every captured button."""
+        try:
+            captures = [
+                (
+                    _decode_service_request(capture).signal,
+                    capture.get(Fields.ROLE, ""),
+                )
+                for capture in call.data[Fields.CAPTURES]
+            ]
+            return await self.hass.async_add_executor_job(
+                lambda: identify_signals(
+                    captures,
+                    limit=call.data[Fields.LIMIT],
+                    appliance_type=call.data[Fields.APPLIANCE_TYPE],
+                )
             )
         except CatalogUnavailableError as error:
             raise ImprintRefineryError(ERROR_CATALOG_UNAVAILABLE, str(error)) from error
@@ -1152,6 +1187,10 @@ def _schemas() -> dict[str, Any]:
         vol.Optional(Fields.FORMAT, default="raw_signed"): vol.In(INPUT_FORMATS),
         vol.Optional(Fields.CARRIER_FREQUENCY): positive,
     }
+    identify_capture = vol.Schema(
+        signal_input
+        | {vol.Optional(Fields.ROLE, default=""): vol.In(("", *SIGNAL_ROLES))}
+    )
     schemas: dict[str, Any] = {
         Actions.CANCEL_CAPTURE: vol.Schema(
             {vol.Required(Fields.INFRARED_RECEIVER_REF): non_empty_string}
@@ -1221,6 +1260,19 @@ def _schemas() -> dict[str, Any]:
         Actions.MATCH_CATALOG_SIGNAL: vol.Schema(
             signal_input
             | {
+                vol.Optional(Fields.LIMIT, default=25): vol.All(
+                    int, vol.Range(min=1, max=100)
+                ),
+            }
+        ),
+        Actions.IDENTIFY_CATALOG_SIGNALS: vol.Schema(
+            {
+                vol.Required(Fields.CAPTURES): vol.All(
+                    [identify_capture], vol.Length(min=1, max=8)
+                ),
+                vol.Optional(Fields.APPLIANCE_TYPE, default="generic"): vol.In(
+                    APPLIANCE_TYPES
+                ),
                 vol.Optional(Fields.LIMIT, default=25): vol.All(
                     int, vol.Range(min=1, max=100)
                 ),

@@ -1,15 +1,20 @@
-import {
-  css,
-  html,
-  nothing,
-  type CSSResult,
-  type TemplateResult,
-} from "lit";
+import { css, html, nothing, type CSSResult, type TemplateResult } from "lit";
 import { repeat } from "lit/directives/repeat.js";
-import type { Dict, LabCodeRepresentation, RegistryData } from "../../types";
+import type {
+  AnalysisData,
+  Dict,
+  LabCodeRepresentation,
+  RegistryData,
+} from "../../types";
 import { buildHomeAssistantUse } from "../../core/home-assistant-use";
 import { haSelectedValue } from "../../core/ha-controls";
-import { slugify } from "../../core/utils";
+import {
+  evidenceLabel,
+  formatDuration,
+  repeatSummary,
+  slugify,
+  type BinaryDecoderMode,
+} from "../../core/utils";
 import "../signal-lab/waveform";
 import { renderFactGrid } from "../shared/metric-grid";
 import { renderWorkspaceEmpty } from "../shared/workspace-empty-state";
@@ -18,6 +23,10 @@ import {
   renderCodeRepresentationView,
   signalCodeViewStyles,
 } from "../signal-lab/code-view";
+import {
+  renderBinaryPayloadView,
+  signalDecodedViewStyles,
+} from "../signal-lab/decoded-view";
 import type { InspectorAction, InspectorTab } from "./events";
 
 export interface CommandInspectorView {
@@ -32,12 +41,18 @@ export interface CommandInspectorView {
   testEmitterRef: string;
   codeFormat: string;
   codeRepresentation?: LabCodeRepresentation;
+  binaryMode: BinaryDecoderMode;
+  signalZoom: number;
+  signalPan: number;
   selectedRevision: number;
   revisionLabel: string;
   onAction: (action: InspectorAction) => void;
 }
 
-export const commandInspectorStyles: CSSResult[] = [signalCodeViewStyles, css`
+export const commandInspectorStyles: CSSResult[] = [
+  signalCodeViewStyles,
+  signalDecodedViewStyles,
+  css`
   .command-inspector-dialog {
     --dialog-content-padding: 0;
     --ha-dialog-width-lg: min(790px, 100vw);
@@ -172,8 +187,22 @@ export const commandInspectorStyles: CSSResult[] = [signalCodeViewStyles, css`
   .command-inspector .history { display: grid; gap: 8px; }
   .command-inspector .history-layout { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(0, 1.3fr); gap: 12px; align-items: start; }
   .command-inspector .history-list { display: grid; gap: 6px; }
-  .command-inspector .history-list ha-button { width: 100%; }
+  .command-inspector .history-list ha-button {
+    width: 100%;
+    min-width: 0;
+    --ha-button-height: auto;
+  }
+  .command-inspector .history-list ha-button::part(base) {
+    min-height: 44px;
+    height: auto;
+    padding-block: 8px;
+    white-space: normal;
+  }
+  .command-inspector .revision-copy { display: grid; gap: 2px; text-align: start; }
+  .command-inspector .revision-copy small { color: var(--imprint-muted); font-weight: 400; }
+  .command-inspector .history-list ha-button[appearance="accent"] .revision-copy small { color: inherit; }
   .command-inspector .history-detail { display: grid; gap: 12px; min-width: 0; }
+  .command-inspector .history-toolbar { display: flex; justify-content: flex-end; }
   .command-inspector .history-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 7px; }
   .command-inspector .history-actions > * { width: 100%; }
   .command-inspector .history-row {
@@ -183,12 +212,21 @@ export const commandInspectorStyles: CSSResult[] = [signalCodeViewStyles, css`
     border-radius: 9px;
     background: var(--imprint-surface-2);
   }
+  .command-inspector .signal-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .command-inspector .signal-zoom { display: flex; gap: 6px; align-items: center; }
   @container (max-width: 420px) {
     .command-inspector .inspector-tabs ha-tab-group-tab { font-size: 13px; }
     .command-inspector .inspector-tabs ha-tab-group-tab::part(base) { padding-inline: 4px; }
     .command-inspector .history-layout { grid-template-columns: 1fr; }
   }
-`];
+`,
+];
 
 export function renderCommandInspector({
   registry,
@@ -202,6 +240,9 @@ export function renderCommandInspector({
   testEmitterRef,
   codeFormat,
   codeRepresentation,
+  binaryMode,
+  signalZoom,
+  signalPan,
   selectedRevision,
   revisionLabel,
   onAction,
@@ -215,13 +256,32 @@ export function renderCommandInspector({
     ? buildHomeAssistantUse(applianceId, commandId, appliance, command)
     : null;
   const revisions = (history?.revisions || []) as Dict[];
-  const currentRevision = Number(history?.current_revision || command.current_revision || 0);
-  const activeRevision = Number(selectedRevision || currentRevision || revisions.at(-1)?.revision || 0);
-  const activeRecord = revisions.find((revision) => Number(revision.revision) === activeRevision);
+  const currentRevision = Number(
+    history?.current_revision || command.current_revision || 0,
+  );
+  const activeRevision = Number(
+    selectedRevision || currentRevision || revisions.at(-1)?.revision || 0,
+  );
+  const activeRecord = revisions.find(
+    (revision) => Number(revision.revision) === activeRevision,
+  );
   const activeSnapshot = (activeRecord?.snapshot || {}) as Dict;
+  const activeAnalysis = (activeSnapshot.analysis || {}) as AnalysisData;
   const timings = command.signal?.timings || [];
-  const duration = command.analysis?.total_duration_us ||
+  const duration =
+    command.analysis?.total_duration_us ||
     timings.reduce((total, value) => total + value, 0);
+  const repeats = repeatSummary(command.analysis || {});
+  const frameRoles = Array.isArray(command.analysis?.frame_roles)
+    ? command.analysis.frame_roles.map((role) =>
+        typeof role === "string"
+          ? role
+          : String((role as Dict)?.role || "auto"),
+      )
+    : [];
+  const signedTimings = timings
+    .map((value, index) => `${index % 2 === 0 ? "+" : "-"}${value}`)
+    .join(" ");
   const tabPrefix = `command-${slugify(profileId)}-${slugify(commandId)}`;
   const panelId = `${tabPrefix}-${tab}-panel`;
   const selectedTabId = `${tabPrefix}-${tab}-tab`;
@@ -232,7 +292,8 @@ export function renderCommandInspector({
       role=${compact ? "document" : "complementary"}
       aria-label="Command details"
     >
-      ${compact
+      ${
+        compact
         ? nothing
         : html`<header class="inspector-head">
             <ha-icon icon=${command.icon || "mdi:remote"}></ha-icon>
@@ -246,7 +307,8 @@ export function renderCommandInspector({
               .label=${"Close command details"}
               @click=${() => onAction({ type: "close" })}
             ><ha-icon icon="mdi:close"></ha-icon></ha-icon-button>
-          </header>`}
+          </header>`
+      }
       <div class="body inspector-body">
         <ha-tab-group
           class="tabs inspector-tabs"
@@ -262,7 +324,8 @@ export function renderCommandInspector({
             >${nextTab[0].toUpperCase() + nextTab.slice(1)}</ha-tab-group-tab>`,
           )}
         </ha-tab-group>
-        ${tab === "overview"
+        ${
+          tab === "overview"
           ? html`<section
               id=${panelId}
               class="section inspector-section"
@@ -270,13 +333,15 @@ export function renderCommandInspector({
               aria-labelledby=${selectedTabId}
               tabindex="0"
             >
-              ${dependentIds.length > 1
+              ${
+                dependentIds.length > 1
                 ? renderWorkspaceNotice({
                     role: "note",
                     icon: "mdi:account-multiple-outline",
                     content: html`Shared by ${dependentIds.length} appliances. Changes apply to all of them.`,
                   })
-                : nothing}
+                  : nothing
+              }
               ${renderFactGrid({
                 className: "command-metrics",
                 facts: [
@@ -292,11 +357,15 @@ export function renderCommandInspector({
                   },
                   {
                     label: "Duration",
-                    value: duration ? `${(duration / 1000).toFixed(2)} ms` : "Unknown",
+                    value: duration
+                      ? `${(duration / 1000).toFixed(2)} ms`
+                      : "Unknown",
                   },
                   {
                     label: "Revisions",
-                    value: String(command.revision_count || revisions.length || 1),
+                    value: String(
+                      command.revision_count || revisions.length || 1,
+                    ),
                   },
                 ],
               })}
@@ -322,7 +391,8 @@ export function renderCommandInspector({
               </div>
               <section class="ha-use inspector-use">
                 <h3>Use in Home Assistant</h3>
-                ${dependentIds.length
+                ${
+                  dependentIds.length
                   ? html`<ha-select
                       .label=${"Appliance for this action"}
                       .helper=${"Choose which appliance entity should send this command. The remote profile can be shared."}
@@ -337,33 +407,40 @@ export function renderCommandInspector({
                           applianceId: haSelectedValue(event),
                         })}
                     ></ha-select>`
-                  : html`<p class="muted">Assign this profile to an appliance to create a standard Home Assistant action.</p>`}
-                ${use?.yaml
+                    : html`<p class="muted">Assign this profile to an appliance to create a standard Home Assistant action.</p>`
+                }
+                ${
+                  use?.yaml
                   ? html`<div class="actions">
                       <ha-button
                         appearance="outlined"
                         variant="neutral"
                         @click=${() => onAction({ type: "copy-action", value: use.yaml })}
                       ><ha-icon slot="start" icon="mdi:content-copy"></ha-icon>Copy action</ha-button>
-                      ${use.deviceUrl
+                      ${
+                        use.deviceUrl
                         ? html`<ha-button
                             appearance="outlined"
                             variant="neutral"
                             .href=${use.deviceUrl}
                           ><ha-icon slot="start" icon="mdi:open-in-new"></ha-icon>Open HA device</ha-button>`
-                        : nothing}
-                      ${use.entityId
+                          : nothing
+                      }
+                      ${
+                        use.entityId
                         ? html`<ha-button
                             appearance="outlined"
                             variant="neutral"
                             @click=${() => onAction({ type: "copy-entity-id", value: use.entityId })}
                           ><ha-icon slot="start" icon="mdi:identifier"></ha-icon>Copy entity ID</ha-button>`
-                        : nothing}
+                          : nothing
+                      }
                     </div>
                     <ha-expansion-panel header="Ready-to-use Home Assistant action">
                       <pre><code>${use.yaml}</code></pre>
                     </ha-expansion-panel>`
-                  : nothing}
+                    : nothing
+                }
               </section>
             </section>`
           : tab === "signal"
@@ -374,29 +451,76 @@ export function renderCommandInspector({
                 aria-labelledby=${selectedTabId}
                 tabindex="0"
               >
-                ${timings.length
+                <div class="signal-toolbar">
+                  <div class="signal-zoom" aria-label="Signal zoom controls">
+                    <ha-icon-button .label=${"Zoom out"} .disabled=${signalZoom <= 1} @click=${() => onAction({ type: "signal-navigation", zoom: Math.max(1, signalZoom / 2), pan: signalPan })}><ha-icon icon="mdi:magnify-minus-outline"></ha-icon></ha-icon-button>
+                    <ha-button appearance="outlined" variant="neutral" @click=${() => onAction({ type: "signal-navigation", zoom: 1, pan: 0 })}>Fit · ${signalZoom.toFixed(signalZoom % 1 ? 1 : 0)}×</ha-button>
+                    <ha-icon-button .label=${"Zoom in"} .disabled=${signalZoom >= 16} @click=${() => onAction({ type: "signal-navigation", zoom: Math.min(16, signalZoom * 2), pan: signalPan })}><ha-icon icon="mdi:magnify-plus-outline"></ha-icon></ha-icon-button>
+                  </div>
+                  <ha-button appearance="outlined" variant="neutral" .disabled=${!timings.length} @click=${() => onAction({ type: "copy-timings", value: signedTimings })}><ha-icon slot="start" icon="mdi:content-copy"></ha-icon>Copy timings</ha-button>
+                </div>
+                ${
+                  timings.length
                   ? html`<imprint-signal-waveform
                       .readOnly=${true}
                       .timings=${timings}
+                      .zoom=${signalZoom}
+                      .pan=${signalPan}
                       .label=${`${command.name} timing waveform`}
+                      @lab-navigation=${(event: CustomEvent) => onAction({ type: "signal-navigation", zoom: Number(event.detail?.zoom || 1), pan: Number(event.detail?.pan || 0) })}
                     ></imprint-signal-waveform>`
                   : renderWorkspaceEmpty({
                       compact: true,
-                      description: "No editable timings are stored for this command.",
-                    })}
+                        description:
+                          "No editable timings are stored for this command.",
+                      })
+                }
                 ${renderFactGrid({
                   className: "command-metrics",
                   facts: [
                     {
                       label: "Pulses",
-                      value: String(command.analysis?.pulse_count || timings.length || "Unknown"),
+                      value: String(
+                        command.analysis?.pulse_count ||
+                          timings.length ||
+                          "Unknown",
+                      ),
                     },
                     {
                       label: "Frames",
                       value: String(command.analysis?.frame_count || "Unknown"),
                     },
+                    {
+                      label: "Duration",
+                      value: duration ? formatDuration(duration) : "Unknown",
+                    },
+                    {
+                      label: "Carrier source",
+                      value: String(
+                        command.signal?.carrier_source || "Unknown",
+                      ).replaceAll("_", " "),
+                    },
+                    {
+                      label: "Captured repeats",
+                      value: repeats.capturedDetail
+                        ? `${repeats.captured} · ${repeats.capturedDetail}`
+                        : repeats.captured,
+                    },
+                    {
+                      label: "Required repeats",
+                      value: repeats.requiredDetail
+                        ? `${repeats.required} · ${repeats.requiredDetail}`
+                        : repeats.required,
+                    },
+                    {
+                      label: "Frame roles",
+                      value: frameRoles.length
+                        ? frameRoles.join(" · ").replaceAll("_", " ")
+                        : "Not classified",
+                    },
                   ],
                 })}
+                <ha-button class="primary-action" appearance="outlined" variant="neutral" .disabled=${busy || !testEmitterRef} @click=${() => onAction({ type: "test-command", profileId, commandId })}><ha-icon slot="start" icon="mdi:send"></ha-icon>Test once</ha-button>
                 <ha-button
                   class="primary-action"
                   appearance="accent"
@@ -418,10 +542,20 @@ export function renderCommandInspector({
                   aria-labelledby=${selectedTabId}
                   tabindex="0"
                 >
+                  ${renderBinaryPayloadView({
+                    analysis: command.analysis,
+                    binaryMode,
+                    headingId: `${tabPrefix}-binary-payload-heading`,
+                    onModeChange: (mode) =>
+                      onAction({ type: "binary-mode-change", mode }),
+                    onCopy: (value) =>
+                      onAction({ type: "copy-bitstream", value }),
+                  })}
                   ${renderCodeRepresentationView({
                     format: codeFormat,
                     representation: codeRepresentation,
-                    description: "Choose a representation to view or copy. Conversion does not change the saved command or transmit it.",
+                    description:
+                      "Choose a representation to view or copy. Conversion does not change the saved command or transmit it.",
                     subject: "saved command",
                     filenameBase: `${profile.name || profileId}-${command.name || commandId}`,
                     request: (action, detail = {}) => {
@@ -430,10 +564,15 @@ export function renderCommandInspector({
                           type: "code-format-change",
                           profileId,
                           commandId,
-                          format: String(detail.format || command.format || "raw_signed"),
+                          format: String(
+                            detail.format || command.format || "raw_signed",
+                          ),
                         });
                       } else if (action === "copy-code") {
-                        onAction({ type: "copy-code", value: String(detail.value || "") });
+                        onAction({
+                          type: "copy-code",
+                          value: String(detail.value || ""),
+                        });
                       } else if (action === "retry-code") {
                         onAction({
                           type: "retry-code-format",
@@ -452,7 +591,11 @@ export function renderCommandInspector({
                   aria-labelledby=${selectedTabId}
                   tabindex="0"
                 >
-                  ${history === null
+                  <div class="history-toolbar">
+                    <ha-button appearance="outlined" variant="neutral" .disabled=${busy} @click=${() => onAction({ type: "export-command-backup", profileId, commandId })}><ha-icon slot="start" icon="mdi:download-outline"></ha-icon>Download command backup</ha-button>
+                  </div>
+                  ${
+                    history === null
                     ? html`<div class="loading" role="status" aria-live="polite"><ha-spinner></ha-spinner><span>Loading revision history…</span></div>`
                     : revisions.length && activeRecord
                       ? html`<div class="history-layout">
@@ -463,12 +606,14 @@ export function renderCommandInspector({
                               (revision) => html`<ha-button
                                 appearance=${Number(revision.revision) === activeRevision ? "accent" : "outlined"}
                                 variant=${Number(revision.revision) === activeRevision ? "brand" : "neutral"}
-                                @click=${() => onAction({
+                                aria-label=${`Revision ${revision.revision}`}
+                                @click=${() =>
+                                  onAction({
                                   type: "revision-select",
                                   revision: Number(revision.revision),
                                   label: String(revision.label || ""),
                                 })}
-                              >Revision ${revision.revision}${Number(revision.revision) === currentRevision ? " · Current" : ""}</ha-button>`,
+                              ><span class="revision-copy"><strong>Revision ${revision.revision}${Number(revision.revision) === currentRevision ? " · Current" : ""}</strong><small>${String(revision.label || revision.action || "Saved").replaceAll("_", " ")}${revision.created_at ? ` · ${new Date(String(revision.created_at)).toLocaleString()}` : ""}</small></span></ha-button>`,
                             )}
                           </div>
                           <div class="history-detail">
@@ -476,9 +621,44 @@ export function renderCommandInspector({
                               <strong>Revision ${activeRevision}${activeRevision === currentRevision ? " · Current" : ""}</strong>
                               <p class="muted">${String(activeRecord.action || "Saved").replaceAll("_", " ")}${activeRecord.created_at ? ` · ${new Date(String(activeRecord.created_at)).toLocaleString()}` : ""}</p>
                             </div>
-                            ${Array.isArray((activeSnapshot.signal as Dict | undefined)?.timings)
+                            ${renderFactGrid({
+                              className: "command-metrics",
+                              facts: [
+                                {
+                                  label: "Created",
+                                  value: activeRecord.created_at
+                                    ? new Date(
+                                        String(activeRecord.created_at),
+                                      ).toLocaleString()
+                                    : "Unknown",
+                                },
+                                {
+                                  label: "Parent",
+                                  value:
+                                    activeRecord.parent_revision == null
+                                      ? "Original revision"
+                                      : `Revision ${activeRecord.parent_revision}`,
+                                },
+                                {
+                                  label: "Recognition evidence",
+                                  value: evidenceLabel(activeAnalysis),
+                                },
+                                {
+                                  label: "Label",
+                                  value: String(
+                                    activeRecord.label || "No label",
+                                  ),
+                                },
+                              ],
+                            })}
+                            ${
+                              Array.isArray(
+                                (activeSnapshot.signal as Dict | undefined)
+                                  ?.timings,
+                              )
                               ? html`<imprint-signal-waveform .readOnly=${true} .timings=${(activeSnapshot.signal as Dict).timings as number[]} .label=${`Revision ${activeRevision} timing waveform`}></imprint-signal-waveform>`
-                              : nothing}
+                                : nothing
+                            }
                             <ha-input
                               .label=${"Revision label"}
                               maxlength="80"
@@ -495,8 +675,13 @@ export function renderCommandInspector({
                             </div>
                           </div>
                         </div>`
-                      : renderWorkspaceEmpty({ compact: true, description: "No revision history is available." })}
-                </section>`}
+                        : renderWorkspaceEmpty({
+                            compact: true,
+                            description: "No revision history is available.",
+                          })
+                  }
+                </section>`
+        }
       </div>
     </aside>
   `;

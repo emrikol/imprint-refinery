@@ -108,7 +108,7 @@ def test_emitter_delegates_core_command_to_the_vendor_bridge() -> None:
     bridge.send.assert_awaited_once_with(adapter(), signal)
 
 
-def test_receiver_fans_vendor_capture_into_core_and_stops_after_unsubscribe() -> None:
+def test_receiver_preserves_assumed_carrier_provenance_in_core_capture() -> None:
     async def exercise() -> None:
         signal = IRSignal([9000, 4500, 560, 1690], 40_000)
         bridge = SimpleNamespace(capture=AsyncMock(return_value=signal))
@@ -126,8 +126,12 @@ def test_receiver_fans_vendor_capture_into_core_and_stops_after_unsubscribe() ->
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-        assert received == [InfraredReceivedSignal([9000, -4500, 560, -1690], 40_000)]
-        bridge.capture.assert_awaited_once_with(adapter(), timeout=60, poll_interval=1)
+        assert received == [InfraredReceivedSignal([9000, -4500, 560, -1690], None)]
+        bridge.capture.assert_awaited_once_with(
+            adapter(),
+            timeout=60 + const.CAPTURE_ARMING_GRACE_SECONDS,
+            poll_interval=1,
+        )
         unsubscribe()
         unsubscribe()
         assert receiver._subscriber_count == 0
@@ -160,5 +164,48 @@ def test_receiver_cancels_vendor_capture_when_the_last_consumer_leaves() -> None
         await asyncio.gather(task, return_exceptions=True)
 
         assert task.cancelled()
+
+    execute(exercise())
+
+
+def test_receiver_restarts_after_cancel_and_immediate_resubscribe() -> None:
+    async def exercise() -> None:
+        first_started = asyncio.Event()
+        captured = IRSignal([9000, 4500, 560, 560], 38_000)
+        calls = 0
+
+        async def capture(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_started.set()
+                await asyncio.Future()
+            return captured
+
+        receiver = SignalReceiver(
+            SimpleNamespace(capture=AsyncMock(side_effect=capture)), adapter(), None
+        )
+        receiver.entity_id = "infrared.living_room_receiver"
+        receiver.async_write_ha_state = lambda: None
+        receiver.hass = SimpleNamespace(
+            async_create_task=lambda coroutine, name: asyncio.create_task(
+                coroutine, name=name
+            )
+        )
+
+        remove_first = receiver.async_subscribe_received_signal(lambda signal: None)
+        await first_started.wait()
+        first_task = receiver._capture_task
+        remove_first()
+
+        received = []
+        remove_second = receiver.async_subscribe_received_signal(received.append)
+        await asyncio.gather(first_task, return_exceptions=True)
+        for _ in range(4):
+            await asyncio.sleep(0)
+
+        assert calls == 2
+        assert received == [InfraredReceivedSignal([9000, -4500, 560, -560], None)]
+        remove_second()
 
     execute(exercise())

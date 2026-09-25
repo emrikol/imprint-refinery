@@ -5,11 +5,16 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+from homeassistant.components.infrared import InfraredReceivedSignal
 from probatio import Invalid as SchemaInvalid
 import pytest
 import voluptuous as vol
 
-from custom_components.imprint_refinery.const import DOMAIN
+from custom_components.imprint_refinery.const import (
+    CAPTURE_ARMING_GRACE_SECONDS,
+    DOMAIN,
+)
+from custom_components.imprint_refinery.errors import ImprintRefineryError
 from custom_components.imprint_refinery.ir_formats import (
     analyze_signal,
     encode_known_protocol,
@@ -128,6 +133,30 @@ def test_import_inspection_contract_accepts_backend_auto_detection() -> None:
     assert validated[Fields.FORMAT] == "auto"
 
 
+def test_catalog_identification_contract_accepts_labeled_captures() -> None:
+    validated = _schemas()[Actions.IDENTIFY_CATALOG_SIGNALS](
+        {
+            Fields.APPLIANCE_TYPE: "light",
+            Fields.CAPTURES: [
+                {
+                    Fields.CODE: "+9000 -4500 +560 -560",
+                    Fields.FORMAT: "raw_signed",
+                    Fields.ROLE: "power_off",
+                },
+                {
+                    Fields.CODE: "+9000 -4500 +560 -1690",
+                    Fields.FORMAT: "raw_signed",
+                },
+            ],
+        }
+    )
+
+    assert validated[Fields.CAPTURES][0][Fields.ROLE] == "power_off"
+    assert validated[Fields.CAPTURES][1][Fields.ROLE] == ""
+    assert validated[Fields.APPLIANCE_TYPE] == "light"
+    assert validated[Fields.LIMIT] == 25
+
+
 def test_registration_installs_only_the_private_panel_api() -> None:
     hass, *_ = runtime_hass()
     api = register_services(hass)
@@ -201,6 +230,75 @@ def test_send_command_uses_appliance_route_not_temporary_test_emitter(
     assert delivered.await_args.args[:2] == (hass, "emitter-registry-uuid")
     command = delivered.await_args.args[2]
     assert command.get_raw_timings() == [9000, -4500, 560, -560]
+
+
+def test_capture_without_reported_modulation_keeps_assumed_carrier(monkeypatch) -> None:
+    hass, *_ = runtime_hass()
+    remove = Mock()
+
+    def subscribe(current_hass, receiver_ref, received):
+        assert current_hass is hass
+        assert receiver_ref == "infrared.receiver"
+        received(InfraredReceivedSignal([9000, -4500, 560, -560], None))
+        return remove
+
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.services.infrared.async_subscribe_receiver",
+        subscribe,
+    )
+
+    response = execute(
+        ServiceAPI(hass).capture_signal(
+            call(
+                Actions.CAPTURE_SIGNAL,
+                infrared_receiver_ref="infrared.receiver",
+                timeout=1,
+            )
+        )
+    )
+
+    assert response["signal"]["carrier_frequency"] == 38_000
+    assert response["signal"]["carrier_source"] == "assumed"
+    remove.assert_called_once_with()
+
+
+def test_capture_deadline_includes_receiver_arming_grace(monkeypatch) -> None:
+    hass, *_ = runtime_hass()
+    remove = Mock()
+    observed_timeout = None
+
+    def subscribe(current_hass, receiver_ref, received):
+        assert current_hass is hass
+        assert receiver_ref == "infrared.receiver"
+        return remove
+
+    async def timeout_capture(result, *, timeout):
+        nonlocal observed_timeout
+        observed_timeout = timeout
+        raise TimeoutError
+
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.services.infrared.async_subscribe_receiver",
+        subscribe,
+    )
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.services.asyncio.wait_for",
+        timeout_capture,
+    )
+
+    with pytest.raises(ImprintRefineryError, match="60 seconds"):
+        execute(
+            ServiceAPI(hass).capture_signal(
+                call(
+                    Actions.CAPTURE_SIGNAL,
+                    infrared_receiver_ref="infrared.receiver",
+                    timeout=60,
+                )
+            )
+        )
+
+    assert observed_timeout == 60 + CAPTURE_ARMING_GRACE_SECONDS
+    remove.assert_called_once_with()
 
 
 def test_backup_export_includes_only_portable_area_name(monkeypatch) -> None:

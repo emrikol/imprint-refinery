@@ -1,6 +1,7 @@
 import { css, html, nothing, type TemplateResult } from "lit";
 import { haSelectedValue } from "../../core/ha-controls";
 import type { SignalLabState } from "../../core/signal-lab";
+import type { AnalysisData } from "../../types";
 import {
   binaryDecoderChoices,
   binaryDecoderMessage,
@@ -23,6 +24,14 @@ export interface SignalDecodedViewProps {
   frameCount: number;
   binaryMode: BinaryDecoderMode;
   request: SignalLabRequest;
+}
+
+export interface BinaryPayloadViewProps {
+  analysis: AnalysisData | undefined;
+  binaryMode: BinaryDecoderMode;
+  headingId: string;
+  onModeChange: (mode: BinaryDecoderMode) => void;
+  onCopy: (value: string) => void;
 }
 
 export const signalDecodedViewStyles = css`
@@ -53,6 +62,7 @@ export const signalDecodedViewStyles = css`
     gap: 12px;
   }
   .binary-head > div { display: grid; gap: 2px; }
+  .binary-head h3 { margin: 0; font: inherit; font-weight: 650; }
   .binary-head small,
   .binary-note { color: var(--imprint-muted); }
   .binary-value {
@@ -121,12 +131,70 @@ function renderCandidate(candidate: Record<string, unknown>): TemplateResult {
       candidate.evidence_class || candidate.confidence || "Unranked",
     ).replaceAll("_", " ")}</strong>
     ${candidate.bits ? html`<small>${String(candidate.bits)}-bit frame</small>` : nothing}
-    ${facts.length
+    ${
+      facts.length
       ? html`<div class="candidate-facts">${facts.map(
-          (key) => html`<span>${key} <code>${decodedValue(candidate[key])}</code></span>`,
+            (key) =>
+              html`<span>${key} <code>${decodedValue(candidate[key])}</code></span>`,
         )}</div>`
-      : nothing}
+        : nothing
+    }
   </div>`;
+}
+
+export function renderBinaryPayloadView({
+  analysis: sourceAnalysis,
+  binaryMode,
+  headingId,
+  onModeChange,
+  onCopy,
+}: BinaryPayloadViewProps): TemplateResult {
+  const analysis = sourceAnalysis || {};
+  const protocol = String(
+    analysis.protocol || analysis.protocol_name || "Unknown protocol",
+  );
+  const binary = binaryPayloadFor(analysis, binaryMode);
+  return html`
+    <div class="decoder-control">
+      <ha-select
+        label="Bitstream decoder"
+        .value=${binaryMode}
+        .options=${binaryDecoderChoices.map((choice) => ({
+          value: choice.value,
+          label: choice.label,
+        }))}
+        @selected=${(event: Event) =>
+          onModeChange(haSelectedValue(event) as BinaryDecoderMode)}
+      ></ha-select>
+    </div>
+    ${
+      binary
+        ? html`<section class="binary-readout" aria-labelledby=${headingId}>
+          <div class="binary-head">
+            <div>
+              <h3 id=${headingId}>Raw bitstream</h3>
+              <small>${binary.bit_count || binary.value.length} bits · ${binaryEncodingLabel(binary.encoding)} · transmission order</small>
+            </div>
+            <span class="badge">${binaryScoreLabel(binary, binaryMode)}</span>
+          </div>
+          <pre class="binary-value" aria-label="Binary payload in transmission order"><code>${groupedBinary(binary.value)}</code></pre>
+          <div class="binary-actions">
+            <span class="binary-note">${binaryPayloadExplanation(
+              binary,
+              protocol === "Unknown protocol" ? undefined : protocol,
+            )}</span>
+            <ha-button appearance="outlined" variant="neutral" @click=${() =>
+              onCopy(
+                binary.value,
+              )}><ha-icon slot="start" icon="mdi:content-copy"></ha-icon>Copy bits</ha-button>
+          </div>
+        </section>`
+        : html`<ha-alert .alertType=${"warning"}>${binaryDecoderMessage(
+            analysis,
+            binaryMode,
+          )}</ha-alert>`
+    }
+  `;
 }
 
 export function renderSignalDecodedView({
@@ -140,7 +208,6 @@ export function renderSignalDecodedView({
   const protocol = String(
     analysis.protocol || analysis.protocol_name || "Unknown protocol",
   );
-  const protocolKnown = protocol !== "Unknown protocol";
   const candidates = Array.isArray(analysis.protocol_candidates)
     ? (analysis.protocol_candidates as Record<string, unknown>[])
     : [];
@@ -170,50 +237,27 @@ export function renderSignalDecodedView({
         },
       ],
     })}
-    <div class="decoder-control">
-      <ha-select
-        label="Bitstream decoder"
-        .value=${binaryMode}
-        .options=${binaryDecoderChoices.map((choice) => ({
-          value: choice.value,
-          label: choice.label,
-        }))}
-        @selected=${(event: Event) =>
-          request("binary-mode", { mode: haSelectedValue(event) })}
-      ></ha-select>
-    </div>
-    ${binary
-      ? html`<section class="binary-readout" aria-labelledby="binary-payload-heading">
-          <div class="binary-head">
-            <div>
-              <strong id="binary-payload-heading">Raw bitstream</strong>
-              <small>${binary.bit_count || binary.value.length} bits · ${binaryEncodingLabel(binary.encoding)} · transmission order</small>
-            </div>
-            <span class="badge">${binaryScoreLabel(binary, binaryMode)}</span>
-          </div>
-          <pre class="binary-value" aria-label="Binary payload in transmission order"><code>${groupedBinary(binary.value)}</code></pre>
-          <div class="binary-actions">
-            <span class="binary-note">${binaryPayloadExplanation(
-              binary,
-              protocolKnown ? protocol : undefined,
-            )}</span>
-            <ha-button appearance="outlined" variant="neutral" @click=${() =>
-              request("copy-code", {
-                value: binary.value,
-                success: "Raw bitstream copied.",
-              })}><ha-icon slot="start" icon="mdi:content-copy"></ha-icon>Copy bits</ha-button>
-          </div>
-        </section>`
-      : html`<ha-alert .alertType=${"warning"}>${binaryDecoderMessage(
+    ${renderBinaryPayloadView({
           analysis,
           binaryMode,
-        )}</ha-alert>`}
-    ${candidates.length
+      headingId: "binary-payload-heading",
+      onModeChange: (mode) => request("binary-mode", { mode }),
+      onCopy: (value) =>
+        request("copy-code", {
+          value,
+          success: "Raw bitstream copied.",
+        }),
+    })}
+    ${
+      candidates.length
       ? html`<ha-expansion-panel class="alternatives" header=${`Protocol interpretations (${candidates.length})`}>
           <div class="advanced-section">${candidates.map(renderCandidate)}</div>
         </ha-expansion-panel>`
-      : html`<p class="muted">${binary
+        : html`<p class="muted">${
+            binary
           ? "No named protocol is claimed. The raw bitstream comes only from the two timing clusters shown above."
-          : "No dependable protocol decode is available. The raw timing sequence remains editable and usable."}</p>`}
+              : "No dependable protocol decode is available. The raw timing sequence remains editable and usable."
+          }</p>`
+    }
   </div>`;
 }

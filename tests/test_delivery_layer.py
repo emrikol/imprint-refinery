@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from homeassistant.components.infrared import InfraredEmitterConsumerEntity
 
@@ -81,6 +81,87 @@ def test_projected_entity_uses_core_consumer_send_path(monkeypatch) -> None:
     assert command.path.remote_profile_id == "television_remote"
     assert command.path.appliance_id == "family_room__television"
     assert command.path.command_id == "power"
+
+
+def test_send_reresolves_emitter_uuid_after_entity_id_rename(monkeypatch) -> None:
+    store = StoreStub()
+    current = {"entity_id": "infrared.original_emitter"}
+    registry = SimpleNamespace(
+        async_get=lambda entity_id: SimpleNamespace(device_id=None)
+    )
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.consumer.er.async_get",
+        lambda hass: registry,
+    )
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.consumer.er.async_validate_entity_id",
+        lambda registry, reference: current["entity_id"],
+    )
+    core_send = AsyncMock()
+    monkeypatch.setattr(
+        "homeassistant.components.infrared.helpers.async_send_command",
+        core_send,
+    )
+    remote = SignalRemote(store, one_remote())
+    remote.hass = store.hass
+    assert remote._infrared_emitter_entity_id == "infrared.original_emitter"
+
+    current["entity_id"] = "infrared.renamed_emitter"
+    execute(remote.async_send_stored_command("power"))
+
+    assert remote._infrared_emitter_entity_id == "infrared.renamed_emitter"
+    core_send.assert_awaited_once()
+    assert core_send.await_args.args[1] == "infrared.renamed_emitter"
+
+
+def test_registry_rename_rebinds_availability_subscription(monkeypatch) -> None:
+    store = StoreStub()
+    current = {"entity_id": "infrared.original_emitter"}
+    registry = SimpleNamespace(
+        async_get=lambda entity_id: SimpleNamespace(device_id=None)
+    )
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.consumer.er.async_get",
+        lambda hass: registry,
+    )
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.consumer.er.async_validate_entity_id",
+        lambda registry, reference: current["entity_id"],
+    )
+    old_availability_remove = Mock()
+    new_availability_remove = Mock()
+    old_registry_remove = Mock()
+    new_registry_remove = Mock()
+    track_registry = Mock(side_effect=[old_registry_remove, new_registry_remove])
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.consumer.async_track_entity_registry_updated_event",
+        track_registry,
+    )
+    remote = SignalRemote(store, one_remote())
+    remote.entity_id = "remote.television"
+    remote.hass = object()
+    remote.async_write_ha_state = Mock()
+    remote._async_track_availability = Mock(
+        side_effect=[old_availability_remove, new_availability_remove]
+    )
+
+    remote._async_rebind_emitter()
+    rename_callback = track_registry.call_args.args[2]
+    current["entity_id"] = "infrared.renamed_emitter"
+    rename_callback(SimpleNamespace())
+
+    assert remote._infrared_emitter_entity_id == "infrared.renamed_emitter"
+    assert [item.args[1] for item in track_registry.call_args_list] == [
+        "infrared.original_emitter",
+        "infrared.renamed_emitter",
+    ]
+    old_availability_remove.assert_called_once_with()
+    old_registry_remove.assert_called_once_with()
+    remote.async_write_ha_state.assert_called_once_with()
+
+    remote._async_unsubscribe_emitter()
+    new_availability_remove.assert_called_once_with()
+    new_registry_remove.assert_called_once_with()
 
 
 class ProjectionEntity:

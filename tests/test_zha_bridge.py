@@ -5,6 +5,7 @@ from dataclasses import replace
 import sys
 import types as module_types
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -17,6 +18,7 @@ from custom_components.imprint_refinery.const import (
 from custom_components.imprint_refinery.errors import ImprintRefineryError
 from custom_components.imprint_refinery.ir_formats import (
     IRSignal,
+    broadlink_decode,
     broadlink_encode,
     zosung_encode,
 )
@@ -401,3 +403,49 @@ def test_read_last_signal_falls_back_to_attribute_name(monkeypatch) -> None:
     result = asyncio.run(ZhaBridge(object()).read_last_signal(_emitter()))
 
     assert result == source
+
+
+def test_hobeian_driver_decodes_broadlink_captures() -> None:
+    emitter = {
+        **_emitter(),
+        "driver": "hobeian_zg_ir01",
+    }
+
+    assert ZhaBridge.driver(emitter).decode_capture("JgAGAAABKJQSEg0F") == (
+        broadlink_decode("JgAGAAABKJQSEg0F")
+    )
+
+
+def test_capture_ignores_malformed_changed_payload_before_valid_signal(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        bridge = ZhaBridge(object())
+        emitter = {
+            **_emitter(),
+            "driver": "hobeian_zg_ir01",
+            "config": {
+                **_emitter()["config"],
+                "capture_reassert_interval": 8,
+            },
+        }
+        payloads = iter(
+            ("stale payload", "malformed changed payload", "JgAGAAABKJQSEg0F")
+        )
+
+        async def read_payload(current_emitter):
+            assert current_emitter is emitter
+            return next(payloads)
+
+        monkeypatch.setattr(bridge, "_read_last_payload", read_payload)
+        monkeypatch.setattr(bridge, "start_capture", AsyncMock())
+        monkeypatch.setattr(bridge, "stop_capture", AsyncMock())
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+        captured = await bridge.capture(emitter, timeout=2, poll_interval=1)
+
+        assert captured == broadlink_decode("JgAGAAABKJQSEg0F")
+        bridge.start_capture.assert_awaited_once_with(emitter)
+        bridge.stop_capture.assert_awaited_once_with(emitter)
+
+    asyncio.run(scenario())

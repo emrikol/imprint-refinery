@@ -15,6 +15,7 @@ class Actions:
     GUIDED_CONTROL = "catalog_guided_control"
     GUIDED_START = "catalog_guided_start"
     GUIDED_TEST = "catalog_guided_test"
+    IDENTIFY_CATALOG_SIGNALS = "catalog_identify_signals"
     MATCH_CATALOG_SIGNAL = "catalog_match_signal"
     GET_CATALOG_PROFILE = "catalog_profile"
     SEARCH_CATALOG = "catalog_search"
@@ -50,6 +51,7 @@ class Fields:
     BITS = "bits"
     BRAND = "brand"
     CANDIDATE = "candidate_id"
+    CAPTURES = "captures"
     CARRIER_FREQUENCY = "carrier_frequency"
     CATEGORY = "category"
     CODE = "code"
@@ -71,6 +73,7 @@ class Fields:
     OUTPUT_FORMAT = "output_format"
     PAYLOAD = "payload"
     POLL_INTERVAL = "poll_interval"
+    PROFILE_IDS = "profile_ids"
     PREFERRED_PLATFORM = "preferred_platform"
     CATALOG_PROFILE_ID = "catalog_profile_id"
     REMOTE_PROFILE_ID = "remote_profile_id"
@@ -120,6 +123,24 @@ SIGNAL_ROLES = (
     "mute",
     "unmute",
     "source",
+)
+
+APPLIANCE_TYPES = (
+    "air_purifier",
+    "audio",
+    "climate",
+    "display",
+    "fan",
+    "fireplace",
+    "heater",
+    "humidifier",
+    "light",
+    "media_player",
+    "projector",
+    "receiver",
+    "set_top_box",
+    "tv",
+    "generic",
 )
 
 AUTOMATIC_PLATFORM = "auto"

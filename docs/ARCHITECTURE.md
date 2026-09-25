@@ -101,12 +101,14 @@ command for library workflows. These operations are private panel RPC, not
 public Home Assistant actions.
 
 The panel URL is the source of truth for stable workspace navigation. Appliance
-and remote-profile selections use path segments; command detail routes also
-record the open Inspector tab. Signal Lab routes record the source profile,
-command, edit/compare view, and active representation tab. Reload and browser
-Back/Forward restore those states without transmitting a signal. Draft timing
-values, selections, zoom, dialogs, and other transient editing state remain
-in memory and are deliberately excluded from shareable URLs.
+and remote-profile selections use path segments. Command detail routes record
+the open Inspector tab, representation, decoder, waveform viewport, and
+selected revision. Signal Lab routes record the source profile, command (or a
+new custom signal), edit/compare view, active representation tab, decoder,
+waveform viewport, overlays, and save pane. Reload and browser Back/Forward
+restore those states without transmitting a signal. Unsaved timing values and
+undo history are too large for a shareable URL, so they are kept in tab-scoped
+session storage with explicit Resume and Discard actions.
 
 Automations use standard projected entity actions: normally
 `remote.send_command`, with native `media_player`, `switch`, or `button.press`

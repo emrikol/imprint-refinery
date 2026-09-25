@@ -1,7 +1,7 @@
 """Reusable import, analysis, conversion, and generation API for IR signals."""
 
 from .analysis import ANALYZER_VERSION, analyze_signal
-from .broadlink import encode as broadlink_encode
+from .broadlink import decode as broadlink_decode, encode as broadlink_encode
 from .conversion import (
     INPUT_FORMATS,
     OUTPUT_FORMATS,
@@ -48,6 +48,7 @@ __all__ = (
     "IRSignal",
     "LircCommand",
     "analyze_signal",
+    "broadlink_decode",
     "broadlink_encode",
     "convert_signal",
     "decode_flipper",

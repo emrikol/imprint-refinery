@@ -140,10 +140,8 @@ export const hardwareRowStyles: CSSResult = css`
   }
 `;
 
-const renderLastActivity = (
-  value?: string | null,
-): string | TemplateResult => {
-  if (!value) return "No activity recorded";
+const renderLastUpdate = (value?: string | null): string | TemplateResult => {
+  if (!value) return "No update recorded";
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return value;
   return html`<time datetime=${value}>${new Intl.DateTimeFormat(undefined, {
@@ -189,11 +187,12 @@ export function renderHardwareRow({
         <span class="hardware-detail-value">${item.area_name || "No Area"}</span>
       </div>
       <div class="hardware-detail hardware-activity">
-        <span class="hardware-detail-label">Last activity</span>
-        <span class="hardware-detail-value">${renderLastActivity(item.last_activity)}</span>
+        <span class="hardware-detail-label">Last state update</span>
+        <span class="hardware-detail-value">${renderLastUpdate(item.last_activity)}</span>
       </div>
     </a>
-    ${item.device_url
+    ${
+      item.device_url
       ? html`<div class="hardware-menu">
           <ha-dropdown
             placement="bottom-end"
@@ -214,6 +213,7 @@ export function renderHardwareRow({
           class="hardware-row-chevron"
           icon="mdi:chevron-right"
           aria-hidden="true"
-        ></ha-icon>`}
+        ></ha-icon>`
+    }
   </article>`;
 }

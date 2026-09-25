@@ -1,5 +1,7 @@
 """Transport-neutral signal formats and protocol-generation behavior."""
 
+import base64
+import random
 import sys
 import types
 import unittest
@@ -28,6 +30,45 @@ def test_broadlink_encoding_matches_the_zg_ir01_transport_packet() -> None:
     source = IRSignal([9_000, 4_500, 560, 560], 38_000)
 
     assert ir_formats.broadlink_encode(source) == "JgAGAAABKJQSEg0F"
+
+
+def test_broadlink_decoding_matches_the_zg_ir01_transport_packet() -> None:
+    restored = ir_formats.broadlink_decode("JgAGAAABKJQSEg0F")
+
+    assert restored == IRSignal([9014, 4507, 548, 548], 38_000)
+
+
+def test_broadlink_decoding_bounds_zg_ir01_padding_length_overcount() -> None:
+    packet = bytearray(base64.b64decode("JgAGAAABKJQSEg0F"))
+    packet[2:4] = (9).to_bytes(2, "little")
+
+    restored = ir_formats.broadlink_decode(base64.b64encode(packet).decode())
+
+    assert restored == IRSignal([9014, 4507, 548, 548], 38_000)
+
+
+def test_broadlink_codec_preserves_transport_ticks_across_generated_signals() -> None:
+    generator = random.Random(0)
+    edge_cases = [1, 30, 7_751, 7_782, 65_535, 1_995_000]
+    generated = [
+        [generator.randint(1, 1_995_000) for _ in range(generator.randint(1, 80))]
+        for _ in range(200)
+    ]
+
+    for timings in (edge_cases, *generated):
+        encoded = ir_formats.broadlink_encode(IRSignal(timings))
+        assert (
+            ir_formats.broadlink_encode(ir_formats.broadlink_decode(encoded)) == encoded
+        )
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["not base64", "AQAAAA==", "JgAFAAAB"],
+)
+def test_broadlink_decoding_rejects_malformed_packets(code: str) -> None:
+    with pytest.raises(IRFormatError):
+        ir_formats.broadlink_decode(code)
 
 
 def test_broadlink_encoding_rejects_unrepresentable_timings() -> None:

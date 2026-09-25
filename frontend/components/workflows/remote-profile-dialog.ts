@@ -54,7 +54,7 @@ export const renderRemoteProfileDialog = ({
         ></ha-input>
         ${mode === "profile" ? html`
           <ha-select
-            .label=${"Appliance category"}
+            .label=${"Appliance type"}
             .value=${String(data.appliance_type || "generic")}
             .options=${applianceTypeOptions(String(data.appliance_type || "generic"))}
             @selected=${workflowFieldSelected(onAction, "appliance_type")}
