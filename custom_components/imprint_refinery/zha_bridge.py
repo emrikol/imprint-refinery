@@ -352,9 +352,7 @@ class ZhaBridge:
                         # the command until a sleepy device polls for it.
                         await self.start_capture(emitter)
                         started = True
-                        _LOGGER.info(
-                            "Infrared capture armed for %s", emitter["ieee"]
-                        )
+                        _LOGGER.info("Infrared capture armed for %s", emitter["ieee"])
                         if armed_callback is not None:
                             armed_callback()
                     except Exception as error:  # noqa: BLE001 - retried below.
