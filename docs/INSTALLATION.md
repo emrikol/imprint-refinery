@@ -8,7 +8,9 @@
 
 The optional ZHA compatibility drivers support a Tuya TS1201 / MOES UFO-R11
 with the `zhaquirks.tuya.ts1201.ZosungIRBlaster` quirk and a HOBEIAN ZG-IR01
-with its model-specific custom quirk.
+with its model-specific custom quirk. The TS1201 quirk ships with Home
+Assistant. The ZG-IR01 quirk is a separate custom file; see
+[Custom ZHA quirk](#custom-zha-quirk-hobeian-zg-ir01-only) below.
 
 ## Supported hardware
 
@@ -49,6 +51,16 @@ The installed directory must contain:
 ```text
 custom_components/imprint_refinery/manifest.json
 ```
+
+## Custom ZHA quirk (HOBEIAN ZG-IR01 only)
+
+The HOBEIAN ZG-IR01 needs a custom ZHA quirk before ZHA exposes its infrared channels. The quirk is **not part of Imprint Refinery**: the integration does not load it, and HACS does not install it. It is vendored in this repository only so the hardware setup stays in one place.
+
+1. Copy [`quirks/zg_ir01.py`](../quirks/zg_ir01.py) to `/config/custom_zha_quirks/zg_ir01.py` on your Home Assistant instance.
+2. Add `custom_quirks_path: /config/custom_zha_quirks/` under `zha:` in `configuration.yaml`.
+3. Restart Home Assistant, then reconfigure the device if its new entities do not appear.
+
+Full details, including how to confirm the quirk applied, are in [`quirks/README.md`](../quirks/README.md). The Tuya TS1201 / MOES UFO-R11 needs no custom file; its quirk ships with Home Assistant.
 
 ## Add the integration
 

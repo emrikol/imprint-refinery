@@ -85,10 +85,14 @@ need an Imprint-specific driver.
 The included compatibility drivers support:
 
 - a ZHA-connected Tuya TS1201 / MOES UFO-R11 using the
-  `zhaquirks.tuya.ts1201.ZosungIRBlaster` quirk;
+  `zhaquirks.tuya.ts1201.ZosungIRBlaster` quirk, which ships with Home
+  Assistant and needs no separate install;
 - a ZHA-connected HOBEIAN ZG-IR01 using its model-specific custom quirk. This
   variant converts Core timings to the Broadlink payload required by its
-  firmware while retaining the Zosung Zigbee transfer protocol.
+  firmware while retaining the Zosung Zigbee transfer protocol. The quirk file
+  is vendored in [`quirks/`](quirks/README.md) with install steps. It is a
+  companion file for ZHA, not part of the Imprint Refinery integration, and
+  neither HACS nor the integration installs or loads it.
 
 ## Installation
 

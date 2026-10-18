@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Vendor the HOBEIAN ZG-IR01 custom ZHA quirk under `quirks/` with install steps. The quirk is a companion file for ZHA, not part of the integration, and neither HACS nor Imprint Refinery installs or loads it.
+
 ## 0.3.1 - 2026-10-18
 
 ### Fixed

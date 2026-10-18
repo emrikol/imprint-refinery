@@ -113,3 +113,32 @@ jobs:
           python-version: "3.14"
       - name: Validate release changelog
         run: python tools/check_release.py "${GITHUB_REF_NAME}"
+
+  release:
+    name: Release
+    needs: release-tag
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.14"
+      - name: Extract release notes
+        run: python tools/release_notes.py "${GITHUB_REF_NAME}" > release-notes.md
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists; skipping."
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "Imprint Refinery ${GITHUB_REF_NAME#v}" \
+              --notes-file release-notes.md
+          fi

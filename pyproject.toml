@@ -4,6 +4,8 @@ testpaths = ["tests"]
 [tool.ruff]
 required-version = ">=0.16.7"
 target-version = "py314"
+# Vendored byte for byte from its own repository; see quirks/README.md.
+exclude = ["quirks"]
 
 [tool.ruff.lint]
 select = [
