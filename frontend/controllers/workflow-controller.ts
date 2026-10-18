@@ -39,6 +39,7 @@ export class WorkflowController {
   private current: DialogState | null = null;
   private capturingReceiverRef = "";
   private learnSequence = 0;
+  private armedPollStop: (() => void) | null = null;
   private backupReviewSequence = 0;
   private guidedCooldownTimer?: number;
   private static readonly guidedSessionKey =
@@ -631,6 +632,39 @@ export class WorkflowController {
     this.host.capturingChanged(receiverRef);
   }
 
+  private stopArmedPoll(): void {
+    this.armedPollStop?.();
+    this.armedPollStop = null;
+  }
+
+  /** Restart the visible countdown when the receiver really arms. */
+  private startArmedPoll(receiver: string): void {
+    this.stopArmedPoll();
+    let stopped = false;
+    this.armedPollStop = () => {
+      stopped = true;
+    };
+    void (async () => {
+      while (!stopped) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        if (stopped) return;
+        try {
+          const status = await this.host.call("capture_status", {
+            infrared_receiver_ref: receiver,
+          });
+          if (stopped) return;
+          if (status?.armed) {
+            this.setCapturing(receiver);
+            this.stopArmedPoll();
+            return;
+          }
+        } catch {
+          return;
+        }
+      }
+    })();
+  }
+
   private firstProfileId(): string {
     return Object.keys(this.host.registry().remote_profiles || {})[0] || "";
   }
@@ -1079,10 +1113,12 @@ export class WorkflowController {
     this.host.setBusy(true);
     try {
       this.setCapturing(receiver);
+      this.startArmedPoll(receiver);
       const captured = await this.host.call("capture_signal", {
         infrared_receiver_ref: receiver,
         timeout: this.host.captureTimeout(),
       });
+      this.stopArmedPoll();
       this.setCapturing("");
       if (sequence !== this.learnSequence || this.current?.kind !== "catalog")
         return;
@@ -1146,6 +1182,7 @@ export class WorkflowController {
         this.host.setError(errorMessage(error));
     } finally {
       if (sequence === this.learnSequence) {
+        this.stopArmedPoll();
         this.setCapturing("");
         this.host.setBusy(false);
         if (this.current?.kind === "catalog") {
@@ -1640,10 +1677,12 @@ export class WorkflowController {
     this.host.setBusy(true);
     try {
       this.setCapturing(receiver);
+      this.startArmedPoll(receiver);
       const captured = await this.host.call("capture_signal", {
         infrared_receiver_ref: receiver,
         timeout: this.host.captureTimeout(),
       });
+      this.stopArmedPoll();
       this.setCapturing("");
       if (sequence !== this.learnSequence || this.current?.kind !== "learn") {
         return;
@@ -1716,6 +1755,7 @@ export class WorkflowController {
       }
     } finally {
       if (sequence === this.learnSequence) {
+        this.stopArmedPoll();
         this.setCapturing("");
         this.host.setBusy(false);
       }

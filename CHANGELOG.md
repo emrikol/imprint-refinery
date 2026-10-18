@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Let the HOBEIAN ZG-IR01 quirk own transmission serialization, terminal acknowledgement, timeout, and cleanup instead of inferring completion from private ZHA transport state.
+- Keep receiver capture listening through transient ZHA read and learn-start failures until its deadline, and never let a failing capture-stop replace the capture result or timeout.
+- Deliver a captured signal before the capture-stop command runs, and keep the panel capture deadline open past the provider deadline so a signal found on the final poll still reaches the panel.
+- Stop a capture early with a receiver-unreachable error when the receiver never accepts learn mode within the arming phase, instead of consuming the full listening window.
+- Stop reasserting learn mode for the HOBEIAN ZG-IR01 after it arms, so the reassert cannot restart or stall its slow learn transfer, and log when capture arms.
+- Bound each learn-start, reassert, and stop attempt so one blocked ZHA call cannot consume the arming phase, and clear the arming signal when a capture starts instead of when a consumer subscribes.
+- Give capture an arming phase with one queued learn-start, start the listening window only after the receiver arms, and restart the panel countdown at the armed moment so the press prompt follows real device state.
+- Poll for a published code every half second, and show the press prompt from the armed moment instead of after a fixed label delay.
+
 ## 0.3.0 - 2026-09-24
 
 ### Added

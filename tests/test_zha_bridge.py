@@ -11,6 +11,9 @@ import pytest
 
 from custom_components.imprint_refinery.const import (
     DEFAULT_CLUSTER_ID,
+    ERROR_CAPTURE_FAILED,
+    ERROR_CAPTURE_TIMEOUT,
+    ERROR_CAPTURE_UNREACHABLE,
     ERROR_CLUSTER_NOT_FOUND,
     ERROR_SEND_FAILED,
     ERROR_ZHA_UNAVAILABLE,
@@ -249,15 +252,28 @@ def test_send_converts_canonical_timings_only_at_the_driver_boundary(
     assert harness.listeners == []
 
 
-def test_hobeian_send_uses_broadlink_timing_packets(monkeypatch) -> None:
-    harness = _ZosungHarness(0xFFFF, complete_during_send=True)
-    harness.install(monkeypatch)
+def test_hobeian_send_uses_broadlink_timing_packets() -> None:
+    async_call = AsyncMock()
+    hass = SimpleNamespace(services=SimpleNamespace(async_call=async_call))
     signal = IRSignal([9000, 4500, 560, 560], 38_000)
     emitter = _emitter() | {"driver": "hobeian_zg_ir01"}
 
-    asyncio.run(ZhaBridge(object()).send(emitter, signal))
+    asyncio.run(ZhaBridge(hass).send(emitter, signal))
 
-    assert harness.calls == [(2, {"code": broadlink_encode(signal)}, 0)]
+    async_call.assert_awaited_once_with(
+        "zha",
+        "issue_zigbee_cluster_command",
+        {
+            "ieee": emitter["ieee"],
+            "endpoint_id": 1,
+            "cluster_id": DEFAULT_CLUSTER_ID,
+            "cluster_type": "in",
+            "command": 2,
+            "command_type": "server",
+            "params": {"code": broadlink_encode(signal)},
+        },
+        blocking=True,
+    )
 
 
 def test_send_waits_for_the_matching_zosung_completion_frame(monkeypatch) -> None:
@@ -297,32 +313,6 @@ def test_send_uses_the_sequence_chosen_by_a_fixed_sequence_device(monkeypatch) -
         assert harness.calls[0][2] == 0
         harness.complete(0)
         await task
-
-    asyncio.run(scenario())
-
-
-def test_hobeian_send_completes_after_the_device_consumes_the_message(
-    monkeypatch,
-) -> None:
-    async def scenario() -> None:
-        harness = _ZosungHarness(40, send_sequence=0)
-        harness.install(monkeypatch)
-        emitter = _emitter() | {"driver": "hobeian_zg_ir01"}
-        task = asyncio.create_task(
-            ZhaBridge(object()).send(
-                emitter,
-                IRSignal([9000, 4500, 560, 560], 38_000),
-            )
-        )
-        await harness.wait_for_calls(1)
-        message_length = len(harness.device.ir_msg_to_send[0])
-        harness.request_chunk(0, message_length - 1)
-        await asyncio.sleep(0)
-        assert not task.done()
-
-        harness.request_chunk(0, message_length)
-        await task
-        assert harness.listeners == []
 
     asyncio.run(scenario())
 
@@ -437,15 +427,267 @@ def test_capture_ignores_malformed_changed_payload_before_valid_signal(
             assert current_emitter is emitter
             return next(payloads)
 
+        real_sleep = asyncio.sleep
         monkeypatch.setattr(bridge, "_read_last_payload", read_payload)
         monkeypatch.setattr(bridge, "start_capture", AsyncMock())
         monkeypatch.setattr(bridge, "stop_capture", AsyncMock())
         monkeypatch.setattr(asyncio, "sleep", AsyncMock())
 
         captured = await bridge.capture(emitter, timeout=2, poll_interval=1)
+        await real_sleep(0)
 
         assert captured == broadlink_decode("JgAGAAABKJQSEg0F")
         bridge.start_capture.assert_awaited_once_with(emitter)
         bridge.stop_capture.assert_awaited_once_with(emitter)
+
+    asyncio.run(scenario())
+
+
+def test_capture_survives_transient_zha_failures_before_a_valid_signal(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        bridge = ZhaBridge(object())
+        emitter = {
+            **_emitter(),
+            "driver": "hobeian_zg_ir01",
+            "config": {
+                **_emitter()["config"],
+                "capture_reassert_interval": 8,
+            },
+        }
+        failure = ImprintRefineryError(ERROR_CAPTURE_FAILED, "transient ZHA failure")
+        reads = iter(("stale payload", "JgAGAAABKJQSEg0F"))
+
+        async def read_payload(current_emitter):
+            assert current_emitter is emitter
+            if bridge.start_capture.await_count == 0:
+                raise failure
+            return next(reads)
+
+        monkeypatch.setattr(bridge, "_read_last_payload", read_payload)
+        monkeypatch.setattr(
+            bridge,
+            "start_capture",
+            AsyncMock(side_effect=[failure, None]),
+        )
+        real_sleep = asyncio.sleep
+        monkeypatch.setattr(bridge, "stop_capture", AsyncMock())
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+        captured = await bridge.capture(emitter, timeout=4, poll_interval=1)
+        await real_sleep(0)
+
+        assert captured == broadlink_decode("JgAGAAABKJQSEg0F")
+        assert bridge.start_capture.await_count == 2
+        bridge.stop_capture.assert_awaited_once_with(emitter)
+
+    asyncio.run(scenario())
+
+
+def test_capture_timeout_survives_a_failing_stop_capture(monkeypatch) -> None:
+    async def scenario() -> None:
+        bridge = ZhaBridge(object())
+        emitter = _emitter()
+
+        async def read_payload(current_emitter):
+            assert current_emitter is emitter
+            return "stale payload"
+
+        monkeypatch.setattr(bridge, "_read_last_payload", read_payload)
+        monkeypatch.setattr(bridge, "start_capture", AsyncMock())
+        monkeypatch.setattr(
+            bridge,
+            "stop_capture",
+            AsyncMock(
+                side_effect=ImprintRefineryError(ERROR_CAPTURE_FAILED, "stop failed")
+            ),
+        )
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+        with pytest.raises(ImprintRefineryError) as raised:
+            await bridge.capture(emitter, timeout=1, poll_interval=1)
+
+        assert raised.value.code == ERROR_CAPTURE_TIMEOUT
+
+    asyncio.run(scenario())
+
+
+def test_capture_reports_arming_once_learn_start_succeeds(monkeypatch) -> None:
+    async def scenario() -> None:
+        bridge = ZhaBridge(object())
+        emitter = {**_emitter(), "driver": "hobeian_zg_ir01"}
+        payloads = iter(("stale payload", "stale payload", "JgAGAAABKJQSEg0F"))
+        armed: list[bool] = []
+
+        async def read_payload(current_emitter):
+            assert current_emitter is emitter
+            return next(payloads)
+
+        monkeypatch.setattr(bridge, "_read_last_payload", read_payload)
+        monkeypatch.setattr(
+            bridge,
+            "start_capture",
+            AsyncMock(
+                side_effect=[
+                    ImprintRefineryError(ERROR_CAPTURE_FAILED, "not yet"),
+                    None,
+                ]
+            ),
+        )
+        monkeypatch.setattr(bridge, "stop_capture", AsyncMock())
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+        captured = await bridge.capture(
+            emitter,
+            timeout=4,
+            poll_interval=1,
+            armed_callback=lambda: armed.append(True),
+        )
+
+        assert captured == broadlink_decode("JgAGAAABKJQSEg0F")
+        assert armed == [True]
+
+    asyncio.run(scenario())
+
+
+def test_capture_stops_at_the_arming_deadline_when_never_armed(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        bridge = ZhaBridge(object())
+        emitter = {**_emitter(), "driver": "hobeian_zg_ir01"}
+
+        async def read_payload(current_emitter):
+            assert current_emitter is emitter
+            return "stale payload"
+
+        monkeypatch.setattr(bridge, "_read_last_payload", read_payload)
+        monkeypatch.setattr(
+            bridge,
+            "start_capture",
+            AsyncMock(
+                side_effect=ImprintRefineryError(
+                    ERROR_CAPTURE_FAILED, "device did not answer"
+                )
+            ),
+        )
+        monkeypatch.setattr(bridge, "stop_capture", AsyncMock())
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+        with pytest.raises(ImprintRefineryError) as raised:
+            await bridge.capture(
+                emitter,
+                timeout=60,
+                poll_interval=1,
+                arming_timeout=3,
+            )
+
+        assert raised.value.code == ERROR_CAPTURE_UNREACHABLE
+
+    asyncio.run(scenario())
+
+
+def test_hobeian_capture_does_not_reassert_after_arming(monkeypatch) -> None:
+    async def scenario() -> None:
+        bridge = ZhaBridge(object())
+        emitter = {
+            **_emitter(),
+            "driver": "hobeian_zg_ir01",
+            "config": {
+                **_emitter()["config"],
+                "capture_reassert_interval": 8,
+            },
+        }
+        payloads = iter(["stale payload"] * 11 + ["JgAGAAABKJQSEg0F"])
+
+        async def read_payload(current_emitter):
+            assert current_emitter is emitter
+            return next(payloads)
+
+        monkeypatch.setattr(bridge, "_read_last_payload", read_payload)
+        monkeypatch.setattr(bridge, "start_capture", AsyncMock())
+        monkeypatch.setattr(bridge, "stop_capture", AsyncMock())
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+        captured = await bridge.capture(emitter, timeout=20, poll_interval=1)
+
+        assert captured == broadlink_decode("JgAGAAABKJQSEg0F")
+        bridge.start_capture.assert_awaited_once_with(emitter)
+
+    asyncio.run(scenario())
+
+
+def test_zosung_capture_still_reasserts_while_listening(monkeypatch) -> None:
+    async def scenario() -> None:
+        bridge = ZhaBridge(object())
+        emitter = {
+            **_emitter(),
+            "config": {
+                **_emitter()["config"],
+                "capture_reassert_interval": 8,
+            },
+        }
+        signal = IRSignal([9000, 4500, 560, 560], 38_000)
+        payloads = iter(["stale payload"] * 11 + [zosung_encode(signal)])
+
+        async def read_payload(current_emitter):
+            assert current_emitter is emitter
+            return next(payloads)
+
+        monkeypatch.setattr(bridge, "_read_last_payload", read_payload)
+        monkeypatch.setattr(bridge, "start_capture", AsyncMock())
+        monkeypatch.setattr(bridge, "stop_capture", AsyncMock())
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+        captured = await bridge.capture(emitter, timeout=20, poll_interval=1)
+
+        assert captured == signal
+        assert bridge.start_capture.await_count == 2
+
+    asyncio.run(scenario())
+
+
+def test_capture_returns_a_signal_before_a_slow_stop_capture(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        real_sleep = asyncio.sleep
+        bridge = ZhaBridge(object())
+        emitter = {
+            **_emitter(),
+            "driver": "hobeian_zg_ir01",
+            "config": {
+                **_emitter()["config"],
+                "capture_reassert_interval": 8,
+            },
+        }
+        payloads = iter(("stale payload", "JgAGAAABKJQSEg0F"))
+        stop_release = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def read_payload(current_emitter):
+            assert current_emitter is emitter
+            return next(payloads)
+
+        async def stop_capture(current_emitter):
+            assert current_emitter is emitter
+            await stop_release.wait()
+            stopped.set()
+
+        monkeypatch.setattr(bridge, "_read_last_payload", read_payload)
+        monkeypatch.setattr(bridge, "start_capture", AsyncMock())
+        monkeypatch.setattr(bridge, "stop_capture", stop_capture)
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+        captured = await asyncio.wait_for(
+            bridge.capture(emitter, timeout=4, poll_interval=1), timeout=5
+        )
+
+        assert captured == broadlink_decode("JgAGAAABKJQSEg0F")
+        assert not stopped.is_set()
+        stop_release.set()
+        await real_sleep(0)
+        assert stopped.is_set()
 
     asyncio.run(scenario())

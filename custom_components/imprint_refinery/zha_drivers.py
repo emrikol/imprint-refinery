@@ -43,7 +43,7 @@ class ZhaDriver:
     decode: Callable[..., IRSignal]
     manufacturers: tuple[str, ...] = ()
     models: tuple[str, ...] = ()
-    send_completion_on_end_request: bool = False
+    reassert_capture: bool = True
 
     def matches_device(self, manufacturer: str | None, model: str | None) -> bool:
         """Return whether optional identity constraints match a device."""
@@ -79,8 +79,8 @@ DRIVERS: tuple[ZhaDriver, ...] = (
         capture_off={"on_off": False},
         send_command=2,
         send_parameter="code",
-        send_completion_cluster=0xED00,
-        send_completion_command=0x04,
+        send_completion_cluster=None,
+        send_completion_command=None,
         send_completion_timeout=10.0,
         capture_attribute="last_learned_ir_code",
         capture_attribute_id=0,
@@ -90,7 +90,9 @@ DRIVERS: tuple[ZhaDriver, ...] = (
         decode=broadlink_decode,
         manufacturers=("HOBEIAN",),
         models=("ZG-IR01",),
-        send_completion_on_end_request=True,
+        # A fresh learn-start can restart this device's slow learn transfer.
+        # Once armed, leave the transfer alone until it completes.
+        reassert_capture=False,
     ),
     ZhaDriver(
         id="zosung_ts1201",

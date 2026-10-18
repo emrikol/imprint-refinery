@@ -32,6 +32,7 @@ class Actions:
     IMPORT_BACKUP = "import_backup"
     IMPORT_COMMAND_BACKUP = "import_command_backup"
     CAPTURE_SIGNAL = "capture_signal"
+    CAPTURE_STATUS = "capture_status"
     GET_LIBRARY = "get_library"
     MOVE_COMMAND = "move_command"
     RENAME_COMMAND = "rename_command"

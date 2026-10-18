@@ -130,8 +130,10 @@ def test_receiver_preserves_assumed_carrier_provenance_in_core_capture() -> None
         bridge.capture.assert_awaited_once_with(
             adapter(),
             timeout=60 + const.CAPTURE_ARMING_GRACE_SECONDS,
-            poll_interval=1,
+            poll_interval=0.5,
+            armed_callback=receiver.capture_armed_event.set,
         )
+        assert not receiver.capture_armed_event.is_set()
         unsubscribe()
         unsubscribe()
         assert receiver._subscriber_count == 0

@@ -28,6 +28,14 @@ DEFAULT_CAPTURE_REASSERT_INTERVAL = 8
 # compatibility provider enter learning mode before the requested listening
 # window consumes the outer service deadline.
 CAPTURE_ARMING_GRACE_SECONDS = 5
+# The panel deadline must end after the compatibility provider deadline. A
+# signal found on the provider's final poll still needs time to cross the
+# Core callback before the panel stops waiting.
+CAPTURE_DELIVERY_GRACE_SECONDS = 10
+# Learn start must succeed within this phase. A receiver that never accepts
+# learn mode fails here with a clear error instead of consuming the whole
+# listening window.
+CAPTURE_ARMING_DEADLINE_SECONDS = 45
 
 # Stable machine-readable failures. These are intentionally terse translation keys.
 ERROR_CATALOG_UNAVAILABLE = "catalog_unavailable"
@@ -39,6 +47,7 @@ ERROR_COMMAND_NOT_FOUND = "command_not_found"
 ERROR_GUIDED_SESSION = "guided_session_error"
 ERROR_CAPTURE_FAILED = "capture_failed"
 ERROR_CAPTURE_TIMEOUT = "capture_timeout"
+ERROR_CAPTURE_UNREACHABLE = "capture_unreachable"
 ERROR_SEND_FAILED = "send_failed"
 ERROR_STORAGE_ERROR = "storage_error"
 ERROR_EMITTER_NOT_CONFIGURED = "emitter_not_configured"

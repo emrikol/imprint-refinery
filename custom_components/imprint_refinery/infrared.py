@@ -138,6 +138,7 @@ class SignalReceiver(_ZhaInfraredEntity, InfraredReceiverEntity):
         self._capture_task: asyncio.Task[None] | None = None
         self._restart_capture_when_done = False
         self._subscriber_count = 0
+        self.capture_armed_event = asyncio.Event()
 
     @callback
     def async_subscribe_received_signal(
@@ -188,6 +189,7 @@ class SignalReceiver(_ZhaInfraredEntity, InfraredReceiverEntity):
             self._ensure_capture_task()
 
     async def _async_capture_once(self) -> None:
+        self.capture_armed_event.clear()
         try:
             signal = await self._bridge.capture(
                 self._adapter,
@@ -195,7 +197,8 @@ class SignalReceiver(_ZhaInfraredEntity, InfraredReceiverEntity):
                     self._adapter["config"]["capture_timeout"]
                     + CAPTURE_ARMING_GRACE_SECONDS
                 ),
-                poll_interval=1,
+                poll_interval=0.5,
+                armed_callback=self.capture_armed_event.set,
             )
         except asyncio.CancelledError:
             raise

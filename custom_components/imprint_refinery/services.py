@@ -8,6 +8,7 @@ from typing import Any
 
 from homeassistant.components import infrared, websocket_api
 from homeassistant.components.infrared import InfraredReceivedSignal
+from homeassistant.components.infrared.const import DATA_COMPONENT
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -30,11 +31,14 @@ from .catalog import (
 )
 from .catalog_sessions import GuidedCatalogSessionManager, GuidedSessionError
 from .const import (
+    CAPTURE_ARMING_DEADLINE_SECONDS,
     CAPTURE_ARMING_GRACE_SECONDS,
+    CAPTURE_DELIVERY_GRACE_SECONDS,
     CONF_IEEE,
     DOMAIN,
     EMITTER_SUBENTRY_TYPE,
     ERROR_CAPTURE_TIMEOUT,
+    ERROR_CAPTURE_UNREACHABLE,
     ERROR_CATALOG_UNAVAILABLE,
     ERROR_CODE_EMPTY,
     ERROR_CODE_INVALID,
@@ -90,6 +94,7 @@ _ID_PATTERN = re.compile(r"^[a-z0-9_]+$")
 PANEL_ACTIONS = (
     Actions.CANCEL_CAPTURE,
     Actions.CAPTURE_SIGNAL,
+    Actions.CAPTURE_STATUS,
     Actions.SEND_SIGNAL,
     Actions.REBUILD_SIGNAL,
     Actions.ANALYZE_SIGNAL,
@@ -292,6 +297,22 @@ _MUTATIONS = {
 }
 
 
+def _capture_armed_event(
+    hass: HomeAssistant, receiver_ref: str
+) -> asyncio.Event | None:
+    """Return the provider arming signal when the receiver exposes one."""
+    try:
+        component = hass.data.get(DATA_COMPONENT)
+        if component is None:
+            return None
+        entity_id = er.async_validate_entity_id(er.async_get(hass), receiver_ref)
+        entity = component.get_entity(entity_id)
+        event = getattr(entity, "capture_armed_event", None)
+        return event if isinstance(event, asyncio.Event) else None
+    except Exception:  # noqa: BLE001 - native receivers arm without a signal.
+        return None
+
+
 class ServiceAPI:
     """Stateful service handlers sharing registry and transport dependencies."""
 
@@ -395,11 +416,27 @@ class ServiceAPI:
                 self.hass, receiver_ref, received
             )
             try:
+                armed_event = _capture_armed_event(self.hass, receiver_ref)
+                if armed_event is not None and not result.done():
+                    try:
+                        await asyncio.wait_for(
+                            armed_event.wait(),
+                            timeout=CAPTURE_ARMING_DEADLINE_SECONDS,
+                        )
+                    except TimeoutError as error:
+                        if not result.done():
+                            raise ImprintRefineryError(
+                                ERROR_CAPTURE_UNREACHABLE,
+                                "The infrared receiver did not answer. "
+                                "Wake the device and try again.",
+                            ) from error
                 try:
                     captured = await asyncio.wait_for(
                         result,
                         timeout=(
-                            call.data[Fields.TIMEOUT] + CAPTURE_ARMING_GRACE_SECONDS
+                            call.data[Fields.TIMEOUT]
+                            + CAPTURE_ARMING_GRACE_SECONDS
+                            + CAPTURE_DELIVERY_GRACE_SECONDS
                         ),
                     )
                 except TimeoutError as error:
@@ -428,6 +465,10 @@ class ServiceAPI:
             final_state=States.CAPTURE_READY,
             start_state=States.CAPTURING,
         )
+
+    async def capture_status(self, call: ServiceCall) -> dict[str, Any]:
+        event = _capture_armed_event(self.hass, call.data[Fields.INFRARED_RECEIVER_REF])
+        return {"armed": True if event is None else event.is_set()}
 
     async def send_signal(self, call: ServiceCall) -> dict[str, Any]:
         signal = _decode_service_request(call.data).signal
@@ -1200,6 +1241,9 @@ def _schemas() -> dict[str, Any]:
                 vol.Required(Fields.INFRARED_RECEIVER_REF): non_empty_string,
                 vol.Optional(Fields.TIMEOUT, default=60): positive,
             }
+        ),
+        Actions.CAPTURE_STATUS: vol.Schema(
+            {vol.Required(Fields.INFRARED_RECEIVER_REF): non_empty_string}
         ),
         Actions.SEND_SIGNAL: vol.Schema(
             signal_input | {vol.Required(Fields.INFRARED_EMITTER_REF): non_empty_string}

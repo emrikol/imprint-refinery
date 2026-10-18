@@ -1,7 +1,7 @@
 """Bridge manufacturer-specific ZHA devices to canonical infrared signals."""
 
 import asyncio
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 import logging
 from typing import Any
 
@@ -11,6 +11,7 @@ from homeassistant.helpers import device_registry as dr
 from .const import (
     ERROR_CAPTURE_FAILED,
     ERROR_CAPTURE_TIMEOUT,
+    ERROR_CAPTURE_UNREACHABLE,
     ERROR_CLUSTER_NOT_FOUND,
     ERROR_SEND_FAILED,
     ERROR_ZHA_DEVICE_NOT_FOUND,
@@ -127,25 +128,18 @@ def cluster_from_proxy(
 class _ClusterCommandWaiter:
     """Resolve when one cluster command arrives for one protocol sequence."""
 
-    def __init__(self, command_id: int, *, complete_on_end_request: bool) -> None:
+    def __init__(self, command_id: int) -> None:
         self._command_id = command_id
-        self._complete_on_end_request = complete_on_end_request
         self._sequence: int | None = None
-        self._message_length: int | None = None
         self._observed_sequences: set[int] = set()
-        self._observed_end_positions: dict[int, int] = {}
         self.completed = asyncio.get_running_loop().create_future()
 
-    def set_transfer(self, sequence: int, message_length: int | None) -> None:
+    def set_transfer(self, sequence: int) -> None:
         """Bind the waiter after the quirk prepares its transfer."""
         self._sequence = sequence
-        self._message_length = message_length
         if self.completed.done():
             return
-        if sequence in self._observed_sequences or (
-            message_length is not None
-            and self._observed_end_positions.get(sequence, -1) >= message_length
-        ):
+        if sequence in self._observed_sequences:
             self.completed.set_result(None)
 
     def cluster_command(self, tsn: int, command_id: int, args: Any) -> None:
@@ -160,17 +154,6 @@ class _ClusterCommandWaiter:
                 self._observed_sequences.add(sequence)
             elif sequence == self._sequence:
                 self.completed.set_result(None)
-            return
-        if not self._complete_on_end_request or command_id != 0x02:
-            return
-        position = int(getattr(args, "position", -1))
-        if self._sequence is None or self._message_length is None:
-            self._observed_end_positions[sequence] = max(
-                position,
-                self._observed_end_positions.get(sequence, -1),
-            )
-        elif sequence == self._sequence and position >= self._message_length:
-            self.completed.set_result(None)
 
 
 class ZhaBridge:
@@ -179,6 +162,7 @@ class ZhaBridge:
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
         self._send_locks: dict[str, asyncio.Lock] = {}
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     @staticmethod
     def driver(emitter: dict[str, Any]) -> ZhaDriver:
@@ -203,13 +187,21 @@ class ZhaBridge:
         )
 
     async def send(self, emitter: dict[str, Any], signal: IRSignal) -> None:
-        """Serialize sends per physical adapter as required by its protocol."""
+        """Send through the driver, serializing only legacy Zosung exchanges."""
+        driver = self.driver(emitter)
+        if driver.send_completion_cluster is None:
+            await self._send_locked(emitter, signal, driver)
+            return
         key = str(emitter["ieee"]).strip().casefold()
         async with self._send_locks.setdefault(key, asyncio.Lock()):
-            await self._send_locked(emitter, signal)
+            await self._send_locked(emitter, signal, driver)
 
-    async def _send_locked(self, emitter: dict[str, Any], signal: IRSignal) -> None:
-        driver = self.driver(emitter)
+    async def _send_locked(
+        self,
+        emitter: dict[str, Any],
+        signal: IRSignal,
+        driver: ZhaDriver,
+    ) -> None:
         params = {driver.send_parameter: driver.encode(signal)}
         if (
             driver.send_completion_cluster is not None
@@ -252,10 +244,7 @@ class ZhaBridge:
             ieee=emitter["ieee"],
         )
         protocol_device = getattr(getattr(control, "endpoint", None), "device", None)
-        waiter = _ClusterCommandWaiter(
-            int(driver.send_completion_command),
-            complete_on_end_request=driver.send_completion_on_end_request,
-        )
+        waiter = _ClusterCommandWaiter(int(driver.send_completion_command))
         completion.add_listener(waiter)
         try:
             try:
@@ -272,17 +261,7 @@ class ZhaBridge:
                     ERROR_SEND_FAILED,
                     "ZHA IR driver does not expose a transmission sequence",
                 ) from error
-            message_length = None
-            if driver.send_completion_on_end_request:
-                pending = getattr(protocol_device, "ir_msg_to_send", {})
-                message = pending.get(expected_sequence)
-                if not isinstance(message, str):
-                    raise ImprintRefineryError(
-                        ERROR_SEND_FAILED,
-                        "ZHA IR driver did not retain its pending transmission",
-                    )
-                message_length = len(message)
-            waiter.set_transfer(expected_sequence, message_length)
+            waiter.set_transfer(expected_sequence)
             try:
                 await asyncio.wait_for(
                     waiter.completed,
@@ -337,37 +316,124 @@ class ZhaBridge:
         *,
         timeout: int,
         poll_interval: int,
+        armed_callback: Callable[[], None] | None = None,
+        command_attempt_timeout: float = 10,
+        arming_timeout: float = 45,
     ) -> IRSignal:
         """Capture one changed signal and always leave learning mode."""
-        previous = await self._read_last_payload(emitter)
-        await self.start_capture(emitter)
+        previous: str | None = None
+        baseline_known = False
+        try:
+            previous = await self._read_last_payload(emitter)
+            baseline_known = True
+        except Exception as error:  # noqa: BLE001 - listening must survive it.
+            _LOGGER.warning(
+                "Could not read the prior infrared capture from %s: %s",
+                emitter["ieee"],
+                error,
+            )
+        captured: IRSignal | None = None
+        started = False
         elapsed = 0.0
+        arming_elapsed = 0.0
         reassert = int(emitter["config"].get("capture_reassert_interval", 8))
         next_reassert = float(reassert)
         try:
-            while elapsed < timeout:
-                await asyncio.sleep(poll_interval)
-                elapsed += poll_interval
-                payload = await self._read_last_payload(emitter)
-                if payload is not None and payload != previous:
-                    previous = payload
+            while captured is None:
+                if not started:
+                    if arming_elapsed >= arming_timeout:
+                        raise ImprintRefineryError(
+                            ERROR_CAPTURE_UNREACHABLE,
+                            "The infrared receiver did not answer. "
+                            "Wake the device and try again.",
+                        )
                     try:
-                        return self.driver(emitter).decode_capture(payload)
-                    except IRFormatError as error:
+                        # One unbounded attempt lets the parent router queue
+                        # the command until a sleepy device polls for it.
+                        await self.start_capture(emitter)
+                        started = True
+                        _LOGGER.info(
+                            "Infrared capture armed for %s", emitter["ieee"]
+                        )
+                        if armed_callback is not None:
+                            armed_callback()
+                    except Exception as error:  # noqa: BLE001 - retried below.
                         _LOGGER.warning(
-                            "Ignoring malformed infrared capture from %s: %s",
+                            "Could not start infrared capture on %s: %s",
                             emitter["ieee"],
                             error,
                         )
-                if elapsed >= next_reassert:
-                    await self.start_capture(emitter)
+                await asyncio.sleep(poll_interval)
+                if started:
+                    elapsed += poll_interval
+                else:
+                    arming_elapsed += poll_interval
+                try:
+                    payload = await self._read_last_payload(emitter)
+                except Exception as error:  # noqa: BLE001 - keep listening.
+                    _LOGGER.warning(
+                        "Could not read infrared capture from %s: %s",
+                        emitter["ieee"],
+                        error,
+                    )
+                else:
+                    if not baseline_known:
+                        previous = payload
+                        baseline_known = True
+                    elif payload is not None and payload != previous:
+                        previous = payload
+                        try:
+                            captured = self.driver(emitter).decode_capture(payload)
+                        except IRFormatError as error:
+                            _LOGGER.warning(
+                                "Ignoring malformed infrared capture from %s: %s",
+                                emitter["ieee"],
+                                error,
+                            )
+                        else:
+                            break
+                if (
+                    started
+                    and self.driver(emitter).reassert_capture
+                    and elapsed >= next_reassert
+                ):
+                    try:
+                        await asyncio.wait_for(
+                            self.start_capture(emitter),
+                            timeout=command_attempt_timeout,
+                        )
+                    except Exception as error:  # noqa: BLE001 - keep listening.
+                        _LOGGER.warning(
+                            "Could not reassert infrared capture on %s: %s",
+                            emitter["ieee"],
+                            error,
+                        )
                     next_reassert += reassert
-            raise ImprintRefineryError(
-                ERROR_CAPTURE_TIMEOUT,
-                f"No new IR signal was captured within {timeout} seconds",
-            )
+                if started and elapsed >= timeout:
+                    raise ImprintRefineryError(
+                        ERROR_CAPTURE_TIMEOUT,
+                        f"No new IR signal was captured within {timeout} seconds",
+                    )
         finally:
-            await self.stop_capture(emitter)
+            if captured is None:
+                await self._async_stop_capture_quietly(emitter)
+        # Deliver the signal first. A slow stop command must not delay or
+        # outlive the caller's own capture deadline.
+        stop_task = asyncio.create_task(self._async_stop_capture_quietly(emitter))
+        self._background_tasks.add(stop_task)
+        stop_task.add_done_callback(self._background_tasks.discard)
+        return captured
+
+    async def _async_stop_capture_quietly(self, emitter: dict[str, Any]) -> None:
+        """Leave learning mode without masking a capture result or timeout."""
+        try:
+            await asyncio.wait_for(self.stop_capture(emitter), timeout=10)
+        except Exception as error:  # noqa: BLE001 - never mask the result.
+            _LOGGER.warning(
+                "Could not stop infrared capture on %s: %s",
+                emitter["ieee"],
+                error,
+            )
 
     async def _command(
         self,
@@ -393,5 +459,6 @@ class ZhaBridge:
         except Exception as error:
             raise ImprintRefineryError(
                 error_code,
-                f"ZHA cluster command {command_id} failed: {error}",
+                f"ZHA cluster command {command_id} failed: "
+                f"{type(error).__name__}: {error!r}",
             ) from error

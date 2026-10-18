@@ -12,6 +12,7 @@ import voluptuous as vol
 
 from custom_components.imprint_refinery.const import (
     CAPTURE_ARMING_GRACE_SECONDS,
+    CAPTURE_DELIVERY_GRACE_SECONDS,
     DOMAIN,
 )
 from custom_components.imprint_refinery.errors import ImprintRefineryError
@@ -262,7 +263,9 @@ def test_capture_without_reported_modulation_keeps_assumed_carrier(monkeypatch) 
     remove.assert_called_once_with()
 
 
-def test_capture_deadline_includes_receiver_arming_grace(monkeypatch) -> None:
+def test_capture_deadline_includes_receiver_arming_and_delivery_grace(
+    monkeypatch,
+) -> None:
     hass, *_ = runtime_hass()
     remove = Mock()
     observed_timeout = None
@@ -297,8 +300,64 @@ def test_capture_deadline_includes_receiver_arming_grace(monkeypatch) -> None:
             )
         )
 
-    assert observed_timeout == 60 + CAPTURE_ARMING_GRACE_SECONDS
+    assert observed_timeout == (
+        60 + CAPTURE_ARMING_GRACE_SECONDS + CAPTURE_DELIVERY_GRACE_SECONDS
+    )
     remove.assert_called_once_with()
+
+
+def test_capture_stops_early_when_the_receiver_never_arms(monkeypatch) -> None:
+    hass, *_ = runtime_hass()
+    remove = Mock()
+    never_armed = asyncio.Event()
+
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.services.infrared.async_subscribe_receiver",
+        lambda current_hass, receiver_ref, received: remove,
+    )
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.services._capture_armed_event",
+        lambda current_hass, receiver_ref: never_armed,
+    )
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.services.CAPTURE_ARMING_DEADLINE_SECONDS",
+        0.05,
+    )
+
+    with pytest.raises(ImprintRefineryError) as raised:
+        execute(
+            ServiceAPI(hass).capture_signal(
+                call(
+                    Actions.CAPTURE_SIGNAL,
+                    infrared_receiver_ref="infrared.receiver",
+                    timeout=60,
+                )
+            )
+        )
+
+    assert raised.value.code == "capture_unreachable"
+    remove.assert_called_once_with()
+
+
+def test_capture_status_reports_the_provider_arming_signal(monkeypatch) -> None:
+    hass, *_ = runtime_hass()
+    armed = asyncio.Event()
+    armed.set()
+    monkeypatch.setattr(
+        "custom_components.imprint_refinery.services._capture_armed_event",
+        lambda current_hass, receiver_ref: armed,
+    )
+
+    response = execute(
+        ServiceAPI(hass).capture_status(
+            call(
+                Actions.CAPTURE_STATUS,
+                infrared_receiver_ref="infrared.receiver",
+            )
+        )
+    )
+
+    assert response == {"armed": True}
 
 
 def test_backup_export_includes_only_portable_area_name(monkeypatch) -> None:

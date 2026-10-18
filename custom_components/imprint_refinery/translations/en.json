@@ -89,6 +89,9 @@
       "message": "The guided matching session could not continue."
     },
     "capture_failed": { "message": "Failed to start or complete IR capture." },
+    "capture_unreachable": {
+      "message": "The infrared receiver did not answer. Wake the device and try again."
+    },
     "capture_timeout": {
       "message": "Timed out while waiting for an IR signal."
     },

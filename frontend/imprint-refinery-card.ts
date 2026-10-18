@@ -346,6 +346,9 @@ export class ImprintRefineryCard extends LitElement {
   }
 
   private setCapturingReceiver(receiverRef: string): void {
+    // A second call for the same capture means the receiver armed. The
+    // countdown restarts there, and the press prompt starts with it.
+    const armedRestart = Boolean(receiverRef && this.captureTimer);
     window.clearInterval(this.captureTimer);
     this.captureTimer = undefined;
     this.capturePromptActive = false;
@@ -357,7 +360,7 @@ export class ImprintRefineryCard extends LitElement {
     const startedAt = Date.now();
     const updateTiming = (): void => {
       const timing = captureTimingState(startedAt, Date.now(), captureWindow);
-      this.capturePromptActive = timing.promptActive;
+      this.capturePromptActive = armedRestart || timing.promptActive;
       this.captureRemaining = timing.remaining;
       if (!timing.expired) return;
       window.clearInterval(this.captureTimer);
