@@ -254,9 +254,16 @@ class ZhaBridge:
                     ERROR_SEND_FAILED,
                     f"ZHA cluster command {driver.send_command} failed: {error}",
                 ) from error
+            # zha-quirks 2.4 (Home Assistant 2026.11) keeps the transfer sequence on the
+            # 0xED00 transmit cluster and confirms the send before command() returns;
+            # zha-quirks 2.3 kept it on the device. The waiter has already recorded a
+            # completion that arrived during command().
+            sequence = getattr(completion, "seq", None)
+            if sequence is None:
+                sequence = getattr(protocol_device, "seq", None)
             try:
-                expected_sequence = int(protocol_device.seq)
-            except (AttributeError, TypeError, ValueError) as error:
+                expected_sequence = int(sequence)
+            except (TypeError, ValueError) as error:
                 raise ImprintRefineryError(
                     ERROR_SEND_FAILED,
                     "ZHA IR driver does not expose a transmission sequence",

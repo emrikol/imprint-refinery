@@ -159,20 +159,22 @@ class _ControlCluster:
 
     async def command(self, command_id, **params) -> None:
         device = self._harness.device
-        device.seq = (
-            (device.seq + 1) % 0x10000
+        # zha-quirks 2.3 keeps the sequence on the device, 2.4 on the 0xED00 cluster.
+        holder = self._harness.transmit if self._harness.seq_on_transmit else device
+        holder.seq = (
+            (holder.seq + 1) % 0x10000
             if self._harness.send_sequence is None
             else self._harness.send_sequence
         )
         code = params.get("code")
         if code is not None:
-            device.ir_msg_to_send[device.seq] = (
+            device.ir_msg_to_send[holder.seq] = (
                 '{"key_num":1,"delay":300,"key1":'
                 f'{{"num":1,"freq":38000,"type":1,"key_code":"{code}"}}}}'
             )
-        self._harness.calls.append((command_id, params, device.seq))
+        self._harness.calls.append((command_id, params, holder.seq))
         if self._harness.complete_during_send:
-            self._harness.complete(device.seq)
+            self._harness.complete(holder.seq)
 
 
 class _TransmitCluster:
@@ -193,14 +195,23 @@ class _ZosungHarness:
         *,
         complete_during_send: bool = False,
         send_sequence: int | None = None,
+        seq_on_transmit: bool = False,
     ) -> None:
-        self.device = SimpleNamespace(seq=start_sequence, ir_msg_to_send={})
+        self.device = (
+            SimpleNamespace(ir_msg_to_send={})
+            if seq_on_transmit
+            else SimpleNamespace(seq=start_sequence, ir_msg_to_send={})
+        )
         self.calls = []
         self.listeners = []
         self.complete_during_send = complete_during_send
         self.send_sequence = send_sequence
+        self.seq_on_transmit = seq_on_transmit
         control = _ControlCluster(self)
         transmit = _TransmitCluster(self)
+        if seq_on_transmit:
+            transmit.seq = start_sequence
+        self.transmit = transmit
         endpoint = SimpleNamespace(
             device=self.device,
             in_clusters={DEFAULT_CLUSTER_ID: control, 0xED00: transmit},
@@ -295,6 +306,48 @@ def test_send_waits_for_the_matching_zosung_completion_frame(monkeypatch) -> Non
 
         harness.complete(41)
         await task
+        assert harness.listeners == []
+
+    asyncio.run(scenario())
+
+
+def test_send_reads_the_sequence_from_the_transmit_cluster_on_zha_quirks_2_4(
+    monkeypatch,
+) -> None:
+    """zha-quirks 2.4 keeps seq on 0xED00 and confirms before command() returns."""
+
+    async def scenario() -> None:
+        harness = _ZosungHarness(40, seq_on_transmit=True, complete_during_send=True)
+        harness.install(monkeypatch)
+        assert not hasattr(harness.device, "seq")
+        await asyncio.wait_for(
+            ZhaBridge(object()).send(
+                _emitter(), IRSignal([9000, 4500, 560, 560], 38_000)
+            ),
+            timeout=1,
+        )
+        assert harness.calls[0][2] == 41
+        assert harness.listeners == []
+
+    asyncio.run(scenario())
+
+
+def test_send_without_any_transmission_sequence_reports_it(monkeypatch) -> None:
+    async def scenario() -> None:
+        harness = _ZosungHarness(40)
+        harness.install(monkeypatch)
+
+        async def command_without_sequence(command_id, **params) -> None:
+            harness.calls.append((command_id, params, None))
+
+        harness.device.endpoints[1].in_clusters[
+            DEFAULT_CLUSTER_ID
+        ].command = command_without_sequence
+        del harness.device.seq
+        with pytest.raises(ImprintRefineryError, match="transmission sequence"):
+            await ZhaBridge(object()).send(
+                _emitter(), IRSignal([9000, 4500, 560, 560], 38_000)
+            )
         assert harness.listeners == []
 
     asyncio.run(scenario())

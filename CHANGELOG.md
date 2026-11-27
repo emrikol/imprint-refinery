@@ -1,10 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 - 2026-11-27
 
 ### Added
 
 - Vendor the HOBEIAN ZG-IR01 custom ZHA quirk under `quirks/` with install steps. The quirk is a companion file for ZHA, not part of the integration, and neither HACS nor Imprint Refinery installs or loads it.
+
+### Fixed
+
+- Send through Zosung/TS1201 emitters on Home Assistant 2026.11 (zha-quirks 2.4): read the transfer sequence from the 0xED00 transmit cluster, where zha-quirks 2.4 keeps it, and fall back to the device for zha-quirks 2.3. Every send had failed with "ZHA IR driver does not expose a transmission sequence".
+- Load the vendored ZG-IR01 quirk on zha-quirks 2.4, which removed `zhaquirks.tuya.ts1201.Bytes`; the quirk now uses zigpy's identical `t.Bytes`. Without the quirk, ZHA paired the device generically and every send failed with `ZHA cluster command 2 failed: KeyError(2)`. The quirk imports on zha-quirks 2.3.0 and 2.4.1.
 
 ## 0.3.1 - 2026-10-18
 

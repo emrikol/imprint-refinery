@@ -48,7 +48,7 @@ from zigpy.zcl.clusters.general import OnOff
 
 from zhaquirks.device import CustomZigpyDevice
 from zhaquirks.tuya.builder import TuyaQuirkBuilder
-from zhaquirks.tuya.ts1201 import Bytes, ZosungIRControl, ZosungIRTransmit
+from zhaquirks.tuya.ts1201 import ZosungIRControl, ZosungIRTransmit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -345,7 +345,7 @@ class ZGIR01Control(ZosungIRControl):
             # This firmware often omits the default response for the study
             # data command. Waiting for it blocks learning for the full
             # request timeout, so send the same payload without that wait.
-            payload = Bytes(b'{"study":0}' if kwargs["on_off"] else b'{"study":1}')
+            payload = t.Bytes(b'{"study":0}' if kwargs["on_off"] else b'{"study":1}')
             return await super(ZosungIRControl, self).command(
                 self.ServerCommandDefs.data.id,
                 payload,
