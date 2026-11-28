@@ -744,3 +744,69 @@ def test_capture_returns_a_signal_before_a_slow_stop_capture(
         assert stopped.is_set()
 
     asyncio.run(scenario())
+
+
+def test_sends_to_different_emitters_run_one_at_a_time_in_arrival_order(
+    monkeypatch,
+) -> None:
+    """At sunset a ZG-IR01 send overlapped a TS1201 burst and took 10 s (2026-11-27)."""
+
+    async def scenario() -> None:
+        events: list[tuple[str, str]] = []
+
+        async def fake_send_locked(self, emitter, signal, driver) -> None:
+            name = emitter["name"]
+            events.append(("start", name))
+            await asyncio.sleep(0.02)
+            events.append(("end", name))
+
+        monkeypatch.setattr(ZhaBridge, "_send_locked", fake_send_locked)
+        monkeypatch.setattr(
+            ZhaBridge,
+            "driver",
+            staticmethod(lambda emitter: SimpleNamespace(send_completion_cluster=None)),
+        )
+        bridge = ZhaBridge(object())
+        signal = IRSignal([9000, 4500, 560, 560], 38_000)
+        emitters = [
+            {"name": n, "ieee": f"00:00:00:00:00:00:00:0{i}"}
+            for i, n in enumerate("abcd")
+        ]
+        await asyncio.gather(*(bridge.send(e, signal) for e in emitters))
+        assert events == [(k, n) for n in "abcd" for k in ("start", "end")]
+
+    asyncio.run(scenario())
+
+
+def test_a_stuck_send_times_out_and_the_next_send_still_runs(monkeypatch) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(
+            "custom_components.imprint_refinery.zha_bridge.SEND_QUEUE_TIMEOUT_SECONDS",
+            0.05,
+        )
+        done: list[str] = []
+
+        async def fake_send_locked(self, emitter, signal, driver) -> None:
+            if emitter["name"] == "stuck":
+                await asyncio.sleep(5)
+            done.append(emitter["name"])
+
+        monkeypatch.setattr(ZhaBridge, "_send_locked", fake_send_locked)
+        monkeypatch.setattr(
+            ZhaBridge,
+            "driver",
+            staticmethod(lambda emitter: SimpleNamespace(send_completion_cluster=None)),
+        )
+        bridge = ZhaBridge(object())
+        signal = IRSignal([9000, 4500, 560, 560], 38_000)
+        stuck = asyncio.create_task(bridge.send({"name": "stuck", "ieee": "a"}, signal))
+        await asyncio.sleep(0)
+        following = asyncio.create_task(
+            bridge.send({"name": "next", "ieee": "b"}, signal)
+        )
+        with pytest.raises(ImprintRefineryError, match="did not finish"):
+            await stuck
+        await following
+        assert done == ["next"]
+
+    asyncio.run(scenario())

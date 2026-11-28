@@ -156,12 +156,19 @@ class _ClusterCommandWaiter:
                 self.completed.set_result(None)
 
 
+# One queue serves every ZHA emitter. A single send finishes in about a second; an overlap of
+# two multi-frame transfers made one of them take 10 s at sunset on 2026-11-27 and the lamp did
+# not switch. The limit keeps one stuck send from blocking the queue for good.
+SEND_QUEUE_TIMEOUT_SECONDS = 120
+
+
 class ZhaBridge:
     """Expose one registered ZHA driver through canonical signal operations."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
-        self._send_locks: dict[str, asyncio.Lock] = {}
+        # asyncio.Lock wakes waiters in arrival order, so this is a first-in, first-out queue.
+        self._send_queue = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
 
     @staticmethod
@@ -187,14 +194,17 @@ class ZhaBridge:
         )
 
     async def send(self, emitter: dict[str, Any], signal: IRSignal) -> None:
-        """Send through the driver, serializing only legacy Zosung exchanges."""
+        """Send through the driver, one send at a time across all ZHA emitters."""
         driver = self.driver(emitter)
-        if driver.send_completion_cluster is None:
-            await self._send_locked(emitter, signal, driver)
-            return
-        key = str(emitter["ieee"]).strip().casefold()
-        async with self._send_locks.setdefault(key, asyncio.Lock()):
-            await self._send_locked(emitter, signal, driver)
+        async with self._send_queue:
+            try:
+                async with asyncio.timeout(SEND_QUEUE_TIMEOUT_SECONDS):
+                    await self._send_locked(emitter, signal, driver)
+            except TimeoutError as error:
+                raise ImprintRefineryError(
+                    ERROR_SEND_FAILED,
+                    f"The IR send did not finish within {SEND_QUEUE_TIMEOUT_SECONDS} s",
+                ) from error
 
     async def _send_locked(
         self,

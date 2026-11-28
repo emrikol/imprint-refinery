@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Send through all ZHA emitters one at a time, in arrival order, with a 120 s limit per send. Only the Tuya TS1201 driver was serialized, and only per device, so a HOBEIAN ZG-IR01 send could overlap another emitter's multi-command burst. At sunset on 2026-11-27 a lamp send took 10 s instead of 1 s and the lamp did not switch.
+
 ## 0.3.2 - 2026-11-27
 
 ### Added
